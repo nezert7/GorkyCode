@@ -1,0 +1,8 @@
+2026-10-26 14:28:26,787 [ERROR] Code E03_E04: Processing failed for session test_user
+2026-10-26 14:28:27,648 [ERROR] Code E03_E04: Processing failed for session test_user
+2026-10-26 14:28:27,648 [ERROR] Code E01: Processing failed for session test_user
+2026-10-26 14:39:42,106 [ERROR] Code E22: Database write failed (TypeError)
+2026-10-26 14:39:42,887 [ERROR] Code E22: Database write failed (TypeError)
+2026-10-26 21:55:32,471 [ERROR] Code E03_E04: Processing failed for session test_user
+2026-10-26 21:55:33,074 [ERROR] Code E03_E04: Processing failed for session test_user
+2026-10-26 21:55:33,075 [ERROR] Code E01: Processing failed for session test_user
