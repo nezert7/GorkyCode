@@ -1,4 +1,4 @@
 /.env
-/test_events.db
 /error.log
-/temp_audio
+/test_events.db
+/test_nez.py
