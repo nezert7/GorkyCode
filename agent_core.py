@@ -136,11 +136,11 @@ class RegexFallbackParser:
 
 class GigaChatOpenAIAdapter:
     """
-    Обёртка над стандартным клиентом OpenAI для работы с GigaChat API без VPN.
+    Обёртка над стандартным клиентом OpenAI для работы с GigaChat API (включая Ultra 3.5) без VPN.
     """
 
     OAUTH_URL = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
-    BASE_URL = "https://gigachat.devices.sberbank.ru/api/v1"
+    BASE_URL = "https://api.giga.chat/v1"
 
     def __init__(self, credentials: str, scope: str = "GIGACHAT_API_PERS"):
         clean_creds = re.sub(r"^(Basic|Bearer)\s+", "", credentials.strip(), flags=re.IGNORECASE)
