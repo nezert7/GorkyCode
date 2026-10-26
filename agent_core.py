@@ -2,8 +2,10 @@ import os
 import re
 import json
 import time
+import uuid
 import logging
 import urllib.request
+import urllib3
 import httpx
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
@@ -13,12 +15,8 @@ from dotenv import load_dotenv
 from database import DatabaseManager
 from tools_schema import build_system_prompt
 
-import uuid
-import urllib3
-
 # Отключаем предупреждения о российском SSL-сертификате Минцифры для GigaChat
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
 
 load_dotenv(override=True)
 
@@ -135,13 +133,14 @@ class RegexFallbackParser:
             "search_query": None
         }
 
+
 class GigaChatOpenAIAdapter:
     """
-    Обёртка над стандартным клиентом OpenAI для работы с GigaChat API (включая Ultra 3.5) без VPN.
+    Обёртка над стандартным клиентом OpenAI для работы с GigaChat API без VPN.
     """
 
     OAUTH_URL = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
-    BASE_URL = "https://api.giga.chat/v1"  # <-- Обновили адрес согласно инструкции с картинки[span_3](start_span)[span_3](end_span)
+    BASE_URL = "https://gigachat.devices.sberbank.ru/api/v1"
 
     def __init__(self, credentials: str, scope: str = "GIGACHAT_API_PERS"):
         clean_creds = re.sub(r"^(Basic|Bearer)\s+", "", credentials.strip(), flags=re.IGNORECASE)
@@ -306,15 +305,12 @@ class VoronaAgentCore:
 
         if gigachat_creds:
             providers.append({
-                "name": "GigaChat Ultra 3.5",
+                "name": "GigaChat",
                 "client": GigaChatOpenAIAdapter(credentials=gigachat_creds, scope=gigachat_scope),
-                "model": os.getenv("GIGACHAT_MODEL") or "GigaChat-Ultra"
+                "model": os.getenv("GIGACHAT_MODEL") or "GigaChat"
             })
 
-
-
         if yandex_key and yandex_folder_id:
-            # Используем прямое соединение без VPN для максимальной скорости в РФ
             yandex_http = httpx.Client(timeout=15.0)
             providers.append({
                 "name": "YandexGPT (latest)",
@@ -340,6 +336,37 @@ class VoronaAgentCore:
                 "model": groq_model
             })
 
+        if gemini_key:
+            g_client = OpenAI(
+                api_key=gemini_key,
+                base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+                http_client=self.http_client
+            )
+            providers.append({
+                "name": "Google Gemini (gemini-3.8-flash)",
+                "client": g_client,
+                "model": model_name or "gemini-3.8-flash"
+            })
+
+        if openrouter_key:
+            or_client = OpenAI(
+                api_key=openrouter_key,
+                base_url="https://openrouter.ai/api/v1",
+                http_client=self.http_client
+            )
+            or_model = model_name or self._discover_openrouter_model(or_client)
+            providers.append({
+                "name": f"OpenRouter ({or_model})",
+                "client": or_client,
+                "model": or_model
+            })
+
+        if openai_key:
+            providers.append({
+                "name": "OpenAI (gpt-4o-mini)",
+                "client": OpenAI(api_key=openai_key, base_url="https://api.openai.com/v1", http_client=self.http_client),
+                "model": model_name or "gpt-4o-mini"
+            })
 
         if providers:
             names = ", ".join(p["name"] for p in providers)
@@ -387,7 +414,6 @@ class VoronaAgentCore:
         today_str = now.strftime("%Y-%m-%d")
         now_time_str = now.strftime("%H:%M")
 
-        # 1. Правило E18: Самоисправление дня недели ('в пятницу нет в субботу')
         weekdays_map = {
             "понедельник": 0, "вторник": 1, "среду": 2, "среда": 2,
             "четверг": 3, "пятницу": 4, "пятница": 4,
@@ -407,7 +433,6 @@ class VoronaAgentCore:
                 days_ahead = 7
             return (now + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
 
-        # 2. Правило E16: Названо только время без даты, и сегодня оно уже прошло
         explicit_today_words = ("сегодня", "завтра", "послезавтра", "вчера")
         has_explicit_day = any(w in lower_text for w in explicit_today_words) or any(
             w in lower_text for w in weekdays_map
@@ -562,7 +587,6 @@ class VoronaAgentCore:
 
         validated_time = self._validate_time(parsed_data.get("time"))
 
-        # Допроверяем дату кодом Python по правилам Аналитика E16 и E18
         validated_date = self._apply_analyst_rules(
             raw_text=clean_input,
             validated_date=validated_date,
@@ -652,3 +676,141 @@ class VoronaAgentCore:
             "operation": "cancel",
             "requires_confirmation": False
         }
+
+
+# =====================================================================
+# МОСТ ИНТЕГРАЦИИ С MAIN.PY И VOICE_SERVICE.PY ВТОРОГО БЭКЕНДЕРА
+# =====================================================================
+
+_default_db: Optional[DatabaseManager] = None
+_default_agent: Optional[VoronaAgentCore] = None
+
+CONFIRM_WORDS = {"да", "верно", "подтверждаю", "сохрани", "сохранить", "ок", "окей", "ага", "правильно", "точно"}
+CANCEL_WORDS = {"нет", "неверно", "отмена", "отменить", "удали", "сброс", "не надо"}
+
+
+def get_shared_agent() -> VoronaAgentCore:
+    """Возвращает единый экземпляр VoronaAgentCore для FastAPI-сервера."""
+    global _default_db, _default_agent
+    if _default_agent is None:
+        _default_db = DatabaseManager(db_path="events.db")
+        _default_agent = VoronaAgentCore(db=_default_db)
+    return _default_agent
+
+
+def format_spoken_response(result: Dict[str, Any]) -> str:
+    """Формирует естественный голосовой ответ на русском языке для озвучки через edge_tts."""
+    ui_status = result.get("ui_status", "")
+    operation = result.get("operation", "")
+
+    if ui_status in ("Не поняла", "Не поняла формат"):
+        msg = "Извините, я не совсем поняла запрос. Повторите, пожалуйста."
+        if result.get("hint"):
+            msg += f" {result['hint']}."
+        return msg
+
+    if ui_status == "Уточнение" or operation == "clarify":
+        return result.get("question") or "Уточните, пожалуйста, дату или время."
+
+    if ui_status == "Подтверждение":
+        data = result.get("data") or {}
+        kind = "Встреча" if data.get("intent") == "Meeting" else "Задача"
+        parts = [f"{kind}: {data.get('action')}"]
+        if data.get("date"):
+            parts.append(f"на дату {data['date']}")
+        if data.get("time"):
+            parts.append(f"в {data['time']}")
+        spoken = ", ".join(parts) + "."
+
+        if data.get("date_warning"):
+            spoken += f" Внимание: {data['date_warning']}."
+        if data.get("date_in_past") == 1:
+            spoken += " Обратите внимание: эта дата уже в прошлом."
+        if data.get("conflicts"):
+            conflict_names = ", ".join(c["action"] for c in data["conflicts"])
+            spoken += f" Внимание: на это время уже назначено: {conflict_names}."
+
+        spoken += " Всё верно?"
+        return spoken
+
+    if ui_status == "Зафиксировано":
+        saved = result.get("saved") or {}
+        kind = "Встреча" if saved.get("intent") == "Meeting" else "Задача"
+        return f"Зафиксировано! {kind} «{saved.get('action', '')}» сохранена."
+
+    if ui_status == "Готова" and operation == "cancel":
+        return "Запись отменена. Готова к новому запросу."
+
+    if operation == "list_period":
+        items = result.get("items") or []
+        period = result.get("period") or {}
+        if not items:
+            return f"На выбранный период ({period.get('start', '')}) запланированных дел нет."
+        lines = [f"Найдено событий: {len(items)}."]
+        for idx, it in enumerate(items[:5], 1):
+            t_str = f" в {it['parsed_time']}" if it.get("parsed_time") else ""
+            lines.append(f"{idx}) {it['action']}{t_str}.")
+        return " ".join(lines)
+
+    if operation == "search":
+        items = result.get("items") or []
+        if not items:
+            return "По вашему запросу в прошлых записях ничего не найдено."
+        top = items[0]
+        d_str = f" на {top['parsed_date']}" if top.get("parsed_date") else ""
+        t_str = f" в {top['parsed_time']}" if top.get("parsed_time") else ""
+        return f"Нашла запись: «{top['action']}»{d_str}{t_str}."
+
+    return "Запрос обработан."
+
+
+def run_agent_turn(
+    user_query: str,
+    history: Optional[List[Dict[str, str]]] = None,
+    session_id: str = "default",
+    audio_duration_sec: float = 2.0
+) -> Dict[str, Any]:
+    """
+    Полноценный цикл обработки для FastAPI (main.py):
+    - Проверяет, не является ли фраза голосовым подтверждением («Верно» / «Отмена»)
+    - Учитывает предыдущий контекст из history при уточнении
+    - Возвращает как текст для озвучки (response), так и структурированный JSON для React UI
+    """
+    agent = get_shared_agent()
+    clean_lower = user_query.strip().lower().strip(".,!?")
+
+    # 1. Если в буфере ждет задача на подтверждение, проверяем голосовые команды «Верно» / «Отмена»
+    if session_id in agent.pending_buffer:
+        if clean_lower in CONFIRM_WORDS:
+            res = agent.confirm_pending(session_id)
+            res["spoken_response"] = format_spoken_response(res)
+            return res
+        if clean_lower in CANCEL_WORDS:
+            res = agent.cancel_pending(session_id)
+            res["spoken_response"] = format_spoken_response(res)
+            return res
+
+    # 2. Если предыдущая реплика ассистента в истории была вопросом-уточнением, склеиваем контекст
+    effective_query = user_query
+    if history and len(history) >= 3:
+        prev_assistant = history[-2].get("content", "")
+        prev_user = history[-3].get("content", "")
+        if "Уточните" in prev_assistant or "На какое время" in prev_assistant:
+            effective_query = f"{prev_user} {user_query}"
+
+    res = agent.process_user_input(
+        raw_text=effective_query,
+        session_id=session_id,
+        audio_duration_sec=audio_duration_sec,
+        auto_confirm=False
+    )
+    res["spoken_response"] = format_spoken_response(res)
+    return res
+
+
+def run_agent_loop(user_query: str, history: Optional[List[Dict[str, str]]] = None) -> str:
+    """
+    Функция обратной совместимости, которую напрямую импортирует main.py второго бэкендера.
+    """
+    turn_result = run_agent_turn(user_query=user_query, history=history)
+    return turn_result["spoken_response"]
