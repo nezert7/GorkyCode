@@ -1,0 +1,108 @@
+@import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: 'Press Start 2P', monospace;
+  background-color: #f0f5fa;
+  overflow: hidden;
+}
+
+.app-container, .screen {
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 60px 100px;
+}
+
+.title-group h1 {
+  font-size: 3.2rem;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.text-black { color: #000; }
+.text-blue { color: #2b3990; }
+
+.indent {
+  margin-left: 140px;
+}
+
+.pixel-btn-start {
+  margin-top: 50px;
+  padding: 15px 50px;
+  font-family: inherit;
+  font-size: 3rem;
+  color: #2b3990;
+  background-color: #ffffff;
+  border: 4px solid #000;
+  box-shadow: 5px 5px 0px #000;
+  cursor: pointer;
+}
+
+.pixel-btn-start:hover {
+  transform: translate(-2px, -2px);
+  box-shadow: 7px 7px 0px #000;
+}
+
+.pixel-btn-start:active {
+  transform: translate(2px, 2px);
+  box-shadow: 3px 3px 0px #000;
+}
+
+.subtext {
+  margin-top: 25px;
+  font-size: 1.1rem;
+  color: #000;
+}
+
+.main-controls {
+  margin-top: 40px;
+}
+
+.icon-action-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 25px;
+}
+
+.pixel-icon-btn {
+  background: #fff;
+  border: 4px solid #000;
+  padding: 12px;
+  cursor: pointer;
+  box-shadow: 4px 4px 0px #000;
+}
+
+.arrow {
+  font-size: 2rem;
+}
+
+.status-text {
+  margin-top: 30px;
+  font-size: 1.2rem;
+}
+
+.history-link {
+  display: inline-block;
+  margin-top: 15px;
+  font-size: 0.9rem;
+  color: #000;
+  text-decoration: underline;
+}
+
+.pixel-art, .pixel-art-icon {
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+.character-container img {
+  height: 75vh;
+  object-fit: contain;
+}

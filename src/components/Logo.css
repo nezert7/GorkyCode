@@ -1,0 +1,47 @@
+.logo {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  font-weight: 400;
+}
+
+.logo span {
+  position: absolute;
+  white-space: nowrap;
+}
+
+.logo__adorable {
+  color: var(--navy);
+}
+
+.logo--start .logo__your {
+  left: calc(var(--u) * 4);
+  top: calc(var(--u) * 64);
+  font-size: calc(var(--u) * 96);
+}
+.logo--start .logo__adorable {
+  left: calc(var(--u) * 256);
+  top: calc(var(--u) * 164);
+  font-size: calc(var(--u) * 128);
+}
+.logo--start .logo__vorona {
+  left: calc(var(--u) * 16);
+  top: calc(var(--u) * 308);
+  font-size: calc(var(--u) * 96);
+}
+
+.logo--menu .logo__your {
+  left: calc(var(--u) * 64);
+  top: calc(var(--u) * 64);
+  font-size: calc(var(--u) * 128);
+}
+.logo--menu .logo__adorable {
+  left: calc(var(--u) * 448);
+  top: calc(var(--u) * 176);
+  font-size: calc(var(--u) * 96);
+}
+.logo--menu .logo__vorona {
+  left: calc(var(--u) * 82);
+  top: calc(var(--u) * 274);
+  font-size: calc(var(--u) * 128);
+}

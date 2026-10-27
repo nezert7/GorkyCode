@@ -1,0 +1,19 @@
+.crow--saved {
+  left: calc(var(--u) * 843);
+  top: calc(var(--u) * 351);
+  width: calc(var(--u) * 371);
+}
+
+.result-box--saved {
+  top: calc(var(--u) * 437);
+}
+
+.result-action--home {
+  left: calc(var(--u) * 292);
+  top: calc(var(--u) * 699);
+}
+
+.history-link--saved {
+  left: calc(var(--u) * 276);
+  top: calc(var(--u) * 760);
+}

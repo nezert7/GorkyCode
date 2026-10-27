@@ -1,0 +1,73 @@
+.crow {
+  position: absolute;
+  height: auto;
+}
+.crow--start {
+  left: calc(var(--u) * 767);
+  top: calc(var(--u) * 333);
+  width: calc(var(--u) * 681.6);
+}
+.crow--menu {
+  left: calc(var(--u) * 849);
+  top: calc(var(--u) * 357);
+  width: calc(var(--u) * 405);
+}
+
+
+.start-button {
+  position: absolute;
+  left: calc(var(--u) * 16);
+  top: calc(var(--u) * 456);
+  width: calc(var(--u) * 733);
+  height: calc(var(--u) * 222);
+  border: calc(var(--u) * 8) solid var(--ink);
+  color: var(--navy);
+  font-size: calc(var(--u) * 128);
+}
+.start-button span {
+  position: absolute;
+  left: calc(var(--u) * 39);
+  top: calc(var(--u) * 39);
+  white-space: nowrap;
+}
+.start-button:hover {
+  background: var(--navy);
+  color: var(--bg);
+}
+.start-caption {
+  position: absolute;
+  left: calc(var(--u) * 165);
+  top: calc(var(--u) * 736);
+  font-size: calc(var(--u) * 32);
+  white-space: nowrap;
+}
+
+.listen-button {
+  position: absolute;
+  left: calc(var(--u) * 295);
+  top: calc(var(--u) * 466);
+}
+.listen-button img {
+  width: calc(var(--u) * 403);
+  height: auto;
+}
+.menu-caption {
+  position: absolute;
+  left: calc(var(--u) * 215);
+  top: calc(var(--u) * 699);
+  font-size: calc(var(--u) * 32);
+  white-space: nowrap;
+}
+.history-link {
+  position: absolute;
+  left: calc(var(--u) * 343);
+  top: calc(var(--u) * 751);
+  font-size: calc(var(--u) * 20);
+  white-space: nowrap;
+  text-decoration: underline;
+  text-decoration-thickness: calc(var(--u) * 2);
+  text-underline-offset: calc(var(--u) * 3);
+}
+.history-link:hover {
+  color: var(--navy);
+}

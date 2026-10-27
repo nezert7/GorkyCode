@@ -1,0 +1,42 @@
+.result-box {
+  position: absolute;
+  left: calc(var(--u) * 72);
+  top: calc(var(--u) * 442);
+  width: calc(var(--u) * 728);
+  height: calc(var(--u) * 225);
+  border: calc(var(--u) * 4) solid var(--ink);
+  padding: calc(var(--u) * 24);
+  display: grid;
+  align-items: safe center;
+  justify-items: center;
+  text-align: center;
+  overflow: auto;
+  font-size: calc(var(--u) * 32);
+  line-height: 1.5;
+}
+
+.result-action {
+  position: absolute;
+  font-size: calc(var(--u) * 32);
+  white-space: nowrap;
+  text-decoration: underline;
+  text-decoration-thickness: calc(var(--u) * 4);
+  text-decoration-skip-ink: none;
+  text-underline-offset: 0;
+}
+.result-action--continue {
+  left: calc(var(--u) * 89);
+  top: calc(var(--u) * 699);
+}
+.result-action--cancel {
+  left: calc(var(--u) * 518);
+  top: calc(var(--u) * 697);
+}
+.result-action:hover {
+  color: var(--navy);
+}
+
+.history-link--result {
+  left: calc(var(--u) * 266);
+  top: calc(var(--u) * 760);
+}
