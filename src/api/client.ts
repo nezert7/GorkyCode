@@ -1,6 +1,6 @@
 // Адрес сервера берётся из файла .env (переменная VITE_API_URL).
 // Пока её нет, приложение работает на заготовленных данных (см. функции в этой папке).
-const baseUrl = import.meta.env.VITE_API_URL as string | undefined
+const baseUrl = import.meta.env.VITE_API_URL || '';
 
 export const useFakeApi = !baseUrl
 
