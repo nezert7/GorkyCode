@@ -1,9 +1,12 @@
+import os
+import sys
 import sqlite3
 import re
 import hashlib
+import subprocess
 import numpy as np
 import pymorphy3
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 
 # Инициализируем морфологический анализатор русского языка (загружается 1 раз в ОЗУ)
@@ -15,7 +18,7 @@ VECTOR_DIM = 512  # Размерность вектора NumPy для сема�
 class TextVectorizer:
     """
     Превращает любой русский текст в нормализованные леммы и 512-мерный вектор NumPy (float32).
-    Устойчив к падежам, однокоренным словам и опечаткам распознавания речи (например, 'малако', 'кли ентом').
+    Устойчив к падежам, однокоренным словам и опечаткам распознавания речи.
     """
 
     @staticmethod
@@ -34,28 +37,119 @@ class TextVectorizer:
         lemmas_str = cls.extract_lemmas(clean_text)
         combined = f" {clean_text} {lemmas_str} "
 
-        # 1. Добавляем вес целым леммам (вес 2.0)
         for lemma in lemmas_str.split():
             idx = int(hashlib.md5(lemma.encode("utf-8")).hexdigest(), 16) % VECTOR_DIM
             vec[idx] += 2.0
 
-        # 2. Добавляем вес символьным 3-граммам (улавливает однокоренные слова и опечатки STT, вес 1.0)
         for i in range(len(combined) - 2):
             trigram = combined[i : i + 3]
             idx = int(hashlib.md5(trigram.encode("utf-8")).hexdigest(), 16) % VECTOR_DIM
             vec[idx] += 1.0
 
-        # Нормализуем вектор по длине (L2-норма), чтобы скалярное произведение сразу давало косинус угла
         norm = np.linalg.norm(vec)
         if norm > 0:
             vec = vec / norm
         return vec
 
 
+class CalendarIntegration:
+    """
+    Интеграция с реальным календарём:
+    1. На macOS добавляет события напрямую в системное приложение Apple «Календарь» через AppleScript.
+    2. На всех ОС обновляет стандартный файл vorona_calendar.ics (RFC 5545 iCalendar).
+    """
+
+    ICS_FILE_PATH = "vorona_calendar.ics"
+
+    @classmethod
+    def sync_event_to_os_calendar(cls, item: Dict[str, Any]) -> bool:
+        """Добавляет событие в нативный календарь macOS (Apple Calendar), если указана дата."""
+        parsed_date = item.get("parsed_date")
+        if not parsed_date:
+            return False
+
+        parsed_time = item.get("parsed_time") or "09:00"
+        title = (item.get("action") or "Задача Ворона").replace('"', '\\"')
+        intent_label = "Встреча" if item.get("intent") == "Meeting" else "Задача"
+        description = f"{intent_label} из голосового ассистента Ворона: {title}"
+
+        if sys.platform == "darwin":
+            try:
+                dt = datetime.strptime(f"{parsed_date} {parsed_time}", "%Y-%m-%d %H:%M")
+                applescript = f'''
+                tell application "Calendar"
+                    if (count of calendars) > 0 then
+                        tell calendar 1
+                            set startDate to current date
+                            set year of startDate to {dt.year}
+                            set month of startDate to {dt.month}
+                            set day of startDate to {dt.day}
+                            set hours of startDate to {dt.hour}
+                            set minutes of startDate to {dt.minute}
+                            set seconds of startDate to 0
+                            set endDate to startDate + (60 * minutes)
+                            make new event at end with properties {{summary:"{title}", start date:startDate, end date:endDate, description:"{description}"}}
+                        end tell
+                    end if
+                end tell
+                '''
+                subprocess.Popen(
+                    ["osascript", "-e", applescript],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+                return True
+            except Exception:
+                return False
+        return False
+
+    @classmethod
+    def export_all_to_ics(cls, items: List[Dict[str, Any]]) -> str:
+        """Генерирует содержимое .ics файла для всех активных задач с датой."""
+        lines = [
+            "BEGIN:VCALENDAR",
+            "VERSION:2.0",
+            "PRODID:-//Vorona Voice Assistant//RU",
+            "CALSCALE:GREGORIAN",
+            "METHOD:PUBLISH"
+        ]
+        for it in items:
+            d_str = it.get("parsed_date")
+            if not d_str:
+                continue
+            t_str = it.get("parsed_time") or "09:00"
+            try:
+                start_dt = datetime.strptime(f"{d_str} {t_str}", "%Y-%m-%d %H:%M")
+            except ValueError:
+                continue
+            end_dt = start_dt + timedelta(hours=1)
+            uid = f"vorona-task-{it.get('id', 0)}@vorona.local"
+            summary = (it.get("action") or "Задача").replace("\n", " ")
+            kind = "Встреча" if it.get("intent") == "Meeting" else "Задача"
+
+            lines.extend([
+                "BEGIN:VEVENT",
+                f"UID:{uid}",
+                f"DTSTART:{start_dt.strftime('%Y%m%dT%H%M%S')}",
+                f"DTEND:{end_dt.strftime('%Y%m%dT%H%M%S')}",
+                f"SUMMARY:[{kind}] {summary}",
+                f"DESCRIPTION:Создано голосовым ассистентом Ворона ({it.get('raw_text', '')})",
+                f"STATUS:{'CONFIRMED' if it.get('status') == 'Active' else 'COMPLETED'}",
+                "END:VEVENT"
+            ])
+        lines.append("END:VCALENDAR")
+        ics_content = "\r\n".join(lines)
+        try:
+            with open(cls.ICS_FILE_PATH, "w", encoding="utf-8") as f:
+                f.write(ics_content)
+        except Exception:
+            pass
+        return ics_content
+
+
 class DatabaseManager:
     """
-    Слой хранения данных SQLite + Поиск на NumPy.
-    Полностью реализует схему таблицы tasks от Аналитика и 4 сценария ТЗ.
+    Слой хранения данных SQLite + Поиск на NumPy + Управление статусами и Календарём.
     """
 
     def __init__(self, db_path: str = "events.db"):
@@ -68,7 +162,6 @@ class DatabaseManager:
         return conn
 
     def _init_db(self) -> None:
-        """Создает таблицу tasks и индексы строго по контракту Аналитика + поля для поиска."""
         with self._get_conn() as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS tasks (
@@ -101,10 +194,6 @@ class DatabaseManager:
         parse_method: str = "llm",
         now_override: Optional[datetime] = None
     ) -> Dict[str, Any]:
-        """
-        Сохраняет подтвержденную запись в таблицу tasks.
-        Автоматически генерирует леммы и NumPy-вектор для последующего поиска.
-        """
         now_dt = now_override or datetime.now()
         created_at = now_dt.strftime("%Y-%m-%dT%H:%M:%S")
 
@@ -127,7 +216,7 @@ class DatabaseManager:
             conn.commit()
             new_id = cursor.lastrowid
 
-        return {
+        saved = {
             "id": new_id,
             "intent": intent,
             "raw_text": raw_text,
@@ -140,8 +229,14 @@ class DatabaseManager:
             "created_at": created_at
         }
 
+        # Автоматическая синхронизация с системным календарём (если это рабочий файл БД, а не in-memory тест)
+        if self.db_path != ":memory:" and not self.db_path.startswith("test"):
+            CalendarIntegration.sync_event_to_os_calendar(saved)
+            CalendarIntegration.export_all_to_ics(self.get_history(limit=200))
+
+        return saved
+
     def check_meeting_conflict(self, parsed_date: str, parsed_time: str) -> List[Dict[str, Any]]:
-        """Дополнительная возможность из ТЗ: проверка конфликтующих встреч на то же время."""
         if not parsed_date or not parsed_time:
             return []
         with self._get_conn() as conn:
@@ -156,12 +251,9 @@ class DatabaseManager:
         self,
         start_date: str,
         end_date: str,
-        intent_filter: Optional[str] = None
+        intent_filter: Optional[str] = None,
+        sort_by: str = "date"
     ) -> List[Dict[str, Any]]:
-        """
-        Сценарий №3 из ТЗ: Получение информации о предстоящих событиях за период
-        ('Что у меня сегодня?', 'Какие задачи на завтра?', 'Что запланировано на эту неделю?').
-        """
         query = """
             SELECT id, intent, raw_text, action, parsed_date, parsed_time,
                    date_in_past, status, parse_method, created_at
@@ -174,19 +266,24 @@ class DatabaseManager:
             query += " AND intent = ?"
             params.append(intent_filter)
 
-        query += " ORDER BY parsed_date ASC, COALESCE(parsed_time, '23:59') ASC"
+        if sort_by == "type":
+            query += " ORDER BY intent ASC, parsed_date ASC, COALESCE(parsed_time, '23:59') ASC"
+        else:
+            query += " ORDER BY parsed_date ASC, COALESCE(parsed_time, '23:59') ASC"
 
         with self._get_conn() as conn:
             rows = conn.execute(query, params).fetchall()
             return [dict(r) for r in rows]
 
-    def search_past_items(self, query_text: str, top_k: int = 5) -> List[Dict[str, Any]]:
-        """
-        Сценарий №4 из ТЗ: Поиск старых задач и событий по естественному запросу.
-        Использует матричное косинусное сходство на NumPy + пересечение лемм pymorphy3.
-        """
+    def search_past_items(
+        self,
+        query_text: str,
+        top_k: int = 5,
+        only_active: bool = False
+    ) -> List[Dict[str, Any]]:
         with self._get_conn() as conn:
-            rows = conn.execute("SELECT * FROM tasks ORDER BY created_at DESC").fetchall()
+            sql = "SELECT * FROM tasks WHERE status = 'Active' ORDER BY created_at DESC" if only_active else "SELECT * FROM tasks ORDER BY created_at DESC"
+            rows = conn.execute(sql).fetchall()
 
         if not rows or not query_text.strip():
             return []
@@ -194,14 +291,12 @@ class DatabaseManager:
         query_vec = TextVectorizer.text_to_vector(query_text)
         query_lemmas = set(TextVectorizer.extract_lemmas(query_text).split())
 
-        # Распаковываем бинарные векторы из SQLite в 2D-матрицу NumPy (N, 512)
         matrix = np.vstack([
             np.frombuffer(r["embedding"], dtype=np.float32) if r["embedding"]
             else np.zeros(VECTOR_DIM, dtype=np.float32)
             for r in rows
         ])
 
-        # Матричное умножение: так как векторы уже L2-нормализованы, dot product = Cosine Similarity
         cosine_scores = np.dot(matrix, query_vec)
 
         results = []
@@ -209,7 +304,6 @@ class DatabaseManager:
             score = float(cosine_scores[idx])
             row_lemmas = set((row["lemmas"] or "").split())
 
-            # Бонус за совпадение начальных форм слов (лемм)
             common_lemmas = query_lemmas.intersection(row_lemmas)
             if common_lemmas:
                 score += 0.25 * (len(common_lemmas) / max(len(query_lemmas), 1))
@@ -223,16 +317,43 @@ class DatabaseManager:
         results.sort(key=lambda x: x["similarity"], reverse=True)
         return results[:top_k]
 
-    def get_history(self, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
-        """Сценарий 6 из документа команды: История запросов (новые сверху)."""
+    def get_history(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        intent_filter: Optional[str] = None,
+        status_filter: Optional[str] = None,
+        sort_by: str = "created_desc"
+    ) -> List[Dict[str, Any]]:
+        """История запросов с поддержкой фильтрации и сортировки по типу задачи (Task / Meeting)."""
+        query = """
+            SELECT id, intent, raw_text, action, parsed_date, parsed_time,
+                   date_in_past, status, parse_method, created_at
+            FROM tasks
+            WHERE 1=1
+        """
+        params: List[Any] = []
+
+        if intent_filter in ("Task", "Meeting"):
+            query += " AND intent = ?"
+            params.append(intent_filter)
+
+        if status_filter in ("Active", "Done"):
+            query += " AND status = ?"
+            params.append(status_filter)
+
+        if sort_by == "type":
+            query += " ORDER BY intent ASC, COALESCE(parsed_date, '9999-12-31') ASC, created_at DESC"
+        elif sort_by == "date":
+            query += " ORDER BY COALESCE(parsed_date, '9999-12-31') ASC, COALESCE(parsed_time, '23:59') ASC"
+        else:
+            query += " ORDER BY created_at DESC"
+
+        query += " LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+
         with self._get_conn() as conn:
-            rows = conn.execute("""
-                SELECT id, intent, raw_text, action, parsed_date, parsed_time,
-                       date_in_past, status, parse_method, created_at
-                FROM tasks
-                ORDER BY created_at DESC
-                LIMIT ? OFFSET ?
-            """, (limit, offset)).fetchall()
+            rows = conn.execute(query, params).fetchall()
             return [dict(r) for r in rows]
 
     def mark_done(self, task_id: int) -> bool:
@@ -241,3 +362,33 @@ class DatabaseManager:
             cur = conn.execute("UPDATE tasks SET status = 'Done' WHERE id = ?", (task_id,))
             conn.commit()
             return cur.rowcount > 0
+
+    def delete_item(self, task_id: int) -> bool:
+        """Удаляет задачу по её ID."""
+        with self._get_conn() as conn:
+            cur = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+            conn.commit()
+            return cur.rowcount > 0
+
+    def find_and_delete_by_query(self, query_text: str) -> Optional[Dict[str, Any]]:
+        """Находит наиболее подходящую задачу по голосовому описанию и удаляет её."""
+        candidates = self.search_past_items(query_text, top_k=1)
+        if not candidates:
+            return None
+        target = candidates[0]
+        if self.delete_item(target["id"]):
+            return target
+        return None
+
+    def find_and_complete_by_query(self, query_text: str) -> Optional[Dict[str, Any]]:
+        """Находит активную задачу по голосовому описанию и переводит в статус Done."""
+        candidates = self.search_past_items(query_text, top_k=1, only_active=True)
+        if not candidates:
+            candidates = self.search_past_items(query_text, top_k=1, only_active=False)
+        if not candidates:
+            return None
+        target = candidates[0]
+        if self.mark_done(target["id"]):
+            target["status"] = "Done"
+            return target
+        return None

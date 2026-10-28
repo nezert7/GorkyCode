@@ -15,7 +15,6 @@ from dotenv import load_dotenv
 from database import DatabaseManager
 from tools_schema import build_system_prompt
 
-# Отключаем предупреждения о российском SSL-сертификате Минцифры для GigaChat
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 load_dotenv(override=True)
@@ -30,7 +29,7 @@ logging.basicConfig(
 class RegexFallbackParser:
     """
     Запасной парсер на регулярных выражениях (по спецификации Аналитика, код E06).
-    Включается автоматически только в том случае, если ни один API-ключ не ответил.
+    Поддерживает create, list_period, search, delete, complete и clarify.
     """
 
     MEETING_KEYWORDS = ("встреч", "созвон", "обед с", "приём", "прием", "планёрк", "планерк")
@@ -44,6 +43,42 @@ class RegexFallbackParser:
 
         lower_text = clean.lower()
 
+        # 1. Удаление голосом
+        del_match = re.search(r"^(?:удали|удалить|убери|убрать|отмени|отменить|сотри)\s+(.+)", lower_text)
+        if del_match:
+            q = re.sub(r"\b(задачу|встречу|напоминание|дело|про|по)\b", "", del_match.group(1)).strip(" ,.?!")
+            return {
+                "operation": "delete",
+                "intent": None,
+                "action": None,
+                "date": None,
+                "end_date": None,
+                "time": None,
+                "search_query": q or del_match.group(1)
+            }
+
+        # 2. Отметка задачи выполненной голосом
+        done_match = re.search(
+            r"(?:отметь|отметить|заверши|завершить|выполнил[а]?|сделал[а]?|закрой|закрыть)\s+(.+)",
+            lower_text
+        )
+        if done_match or "выполненной" in lower_text or "выполнено" in lower_text:
+            q = re.sub(
+                r"\b(отметь|отметить|заверши|задачу|встречу|дело|как|выполненной|выполненную|выполнено|сделанной|про|по)\b",
+                "",
+                lower_text
+            ).strip(" ,.?!")
+            return {
+                "operation": "complete",
+                "intent": None,
+                "action": None,
+                "date": None,
+                "end_date": None,
+                "time": None,
+                "search_query": q or clean
+            }
+
+        # 3. Поиск старых задач
         search_match = re.search(r"(?:найди|найти|поищи|искать|когда\s+у\s+меня\s+был[аои]?)\s+(.+)", lower_text)
         if search_match or "найди ее" in lower_text or "найди её" in lower_text:
             q = re.sub(r"\b(задачу|встречу|про|по|я когда-то ставил|найди ее|найди её)\b", "", lower_text).strip(" ,.?!")
@@ -57,16 +92,29 @@ class RegexFallbackParser:
                 "search_query": q or clean
             }
 
-        if re.search(r"\b(что у меня|какие дела|какие задачи|какие планы|есть ли встречи|что запланировано)\b", lower_text):
-            target_date = now.strftime("%Y-%m-%d")
+        # 4. Просмотр задач за период
+        if re.search(r"\b(что у меня|какие дела|какие задачи|какие встречи|какие планы|есть ли встречи|что запланировано|покажи задачи|покажи встречи)\b", lower_text):
+            start_date = now.strftime("%Y-%m-%d")
+            end_date = start_date
             if "завтра" in lower_text:
-                target_date = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+                start_date = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+                end_date = start_date
+            elif "недел" in lower_text:
+                days_until_sunday = 6 - now.weekday()
+                end_date = (now + timedelta(days=days_until_sunday)).strftime("%Y-%m-%d")
+
+            intent_filter = None
+            if "встреч" in lower_text:
+                intent_filter = "Meeting"
+            elif "задач" in lower_text:
+                intent_filter = "Task"
+
             return {
                 "operation": "list_period",
-                "intent": None,
+                "intent": intent_filter,
                 "action": None,
-                "date": target_date,
-                "end_date": target_date,
+                "date": start_date,
+                "end_date": end_date,
                 "time": None,
                 "search_query": None
             }
@@ -135,20 +183,19 @@ class RegexFallbackParser:
 
 
 class GigaChatOpenAIAdapter:
-    """
-    Обёртка над стандартным клиентом OpenAI для работы с GigaChat API (включая Ultra 3.5) без VPN.
-    """
+    """Обёртка для работы с GigaChat API с автоматическим определением доступной модели."""
 
     OAUTH_URL = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
-    BASE_URL = "https://api.giga.chat/v1"
+    BASE_URL = "https://gigachat.devices.sberbank.ru/api/v1"
 
     def __init__(self, credentials: str, scope: str = "GIGACHAT_API_PERS"):
         clean_creds = re.sub(r"^(Basic|Bearer)\s+", "", credentials.strip(), flags=re.IGNORECASE)
         self.credentials = clean_creds
         self.scope = scope
-        self.http_client = httpx.Client(verify=False, timeout=15.0)
+        self.http_client = httpx.Client(verify=False, timeout=20.0)
         self._access_token: Optional[str] = None
         self._expires_at: float = 0.0
+        self._detected_model: Optional[str] = None
 
     def _ensure_token(self) -> str:
         now_ts = time.time()
@@ -175,22 +222,50 @@ class GigaChatOpenAIAdapter:
         self._expires_at = float(exp_ms) / 1000.0
         return self._access_token
 
+    def _get_active_model(self, token: str) -> str:
+        if self._detected_model:
+            return self._detected_model
+        try:
+            resp = self.http_client.get(
+                f"{self.BASE_URL}/models",
+                headers={"Authorization": f"Bearer {token}"}
+            )
+            if resp.status_code == 200:
+                data = resp.json().get("data", [])
+                chat_models = [m.get("id") for m in data if "embed" not in (m.get("id") or "").lower()]
+                if chat_models:
+                    self._detected_model = chat_models[0]
+                    return self._detected_model
+        except Exception:
+            pass
+        self._detected_model = "GigaChat"
+        return self._detected_model
+
     @property
     def chat(self):
         token = self._ensure_token()
-        client = OpenAI(
-            api_key=token,
-            base_url=self.BASE_URL,
-            http_client=self.http_client
-        )
-        return client.chat
+        active_model = self._get_active_model(token)
+        http_client = self.http_client
+        base_url = self.BASE_URL
+
+        class _ChatWrapper:
+            class _Completions:
+                def create(self, **kwargs):
+                    kwargs["model"] = active_model
+                    client = OpenAI(api_key=token, base_url=base_url, http_client=http_client)
+                    return client.chat.completions.create(**kwargs)
+
+            def __init__(self):
+                self.completions = self._Completions()
+
+        return _ChatWrapper()
 
 
 class VoronaAgentCore:
     """
     Ядро голосового ассистента «Ворона».
-    Автоматически подхватывает системный VPN macOS, находит актуальные модели
-    и проверяет краевые случаи E01-E24.
+    Реализует создание, поиск за период, векторный поиск, голосовое удаление,
+    отметку выполнения и многошаговый уточняющий диалог.
     """
 
     def __init__(
@@ -206,6 +281,7 @@ class VoronaAgentCore:
         self.active_provider_idx = 0
 
         self.pending_buffer: Dict[str, Dict[str, Any]] = {}
+        self.clarification_buffer: Dict[str, Dict[str, Any]] = {}
         self.fail_streak: Dict[str, int] = {}
 
     @staticmethod
@@ -240,7 +316,6 @@ class VoronaAgentCore:
 
     @staticmethod
     def _discover_groq_model(client: OpenAI) -> str:
-        """Запрашивает у сервера Groq список реально существующих моделей и выбирает лучшую текстовую."""
         try:
             models_resp = client.models.list()
             available_ids = [m.id for m in models_resp.data]
@@ -260,7 +335,6 @@ class VoronaAgentCore:
 
     @staticmethod
     def _discover_openrouter_model(client: OpenAI) -> str:
-        """Находит реально работающую бесплатную модель (:free) на OpenRouter."""
         try:
             models_resp = client.models.list()
             free_ids = [m.id for m in models_resp.data if m.id.endswith(":free")]
@@ -307,7 +381,7 @@ class VoronaAgentCore:
             providers.append({
                 "name": "GigaChat",
                 "client": GigaChatOpenAIAdapter(credentials=gigachat_creds, scope=gigachat_scope),
-                "model": os.getenv("GIGACHAT_MODEL") or "GigaChat"
+                "model": "GigaChat"
             })
 
         if yandex_key and yandex_folder_id:
@@ -343,9 +417,9 @@ class VoronaAgentCore:
                 http_client=self.http_client
             )
             providers.append({
-                "name": "Google Gemini (gemini-3.8-flash)",
+                "name": "Google Gemini (gemini-2.5-flash)",
                 "client": g_client,
-                "model": model_name or "gemini-3.8-flash"
+                "model": model_name or "gemini-2.5-flash"
             })
 
         if openrouter_key:
@@ -405,11 +479,6 @@ class VoronaAgentCore:
         validated_time: Optional[str],
         now: datetime
     ) -> Optional[str]:
-        """
-        Детерминированная проверка правил Аналитика E16 и E18 в коде Python:
-        1. E18 (Самоисправление дня недели): 'в пятницу нет в субботу' -> берем последний названный день недели.
-        2. E16 (Только время без даты): если время сегодня уже прошло (<= now), переносим на завтра.
-        """
         lower_text = raw_text.lower()
         today_str = now.strftime("%Y-%m-%d")
         now_time_str = now.strftime("%H:%M")
@@ -521,8 +590,13 @@ class VoronaAgentCore:
             return self._register_failure(session_id, "E01", "Не поняла")
 
         clean_input = raw_text.strip()
-        parse_method = "llm"
 
+        # Если сессия ожидает ответа на уточняющий вопрос — объединяем предыдущий черновик с новым ответом
+        if session_id in self.clarification_buffer:
+            prev_draft = self.clarification_buffer.pop(session_id)
+            clean_input = f"{prev_draft.get('original_text', '')} {clean_input}".strip()
+
+        parse_method = "llm"
         parsed_data = self._call_llm_json(clean_input, now)
 
         if not isinstance(parsed_data, dict) or "operation" not in parsed_data:
@@ -538,6 +612,7 @@ class VoronaAgentCore:
 
         self.fail_streak[session_id] = 0
 
+        # Сценарий: Поиск задач за определенный период (+ фильтр по типу)
         if operation == "list_period":
             start_d = self._validate_calendar_date(parsed_data.get("date")) or today_str
             end_d = self._validate_calendar_date(parsed_data.get("end_date")) or start_d
@@ -548,9 +623,11 @@ class VoronaAgentCore:
                 "operation": "list_period",
                 "requires_confirmation": False,
                 "period": {"start": start_d, "end": end_d},
+                "intent_filter": intent_filter,
                 "items": items
             }
 
+        # Сценарий: Семантический поиск прошлых задач
         if operation == "search":
             query = parsed_data.get("search_query") or parsed_data.get("action") or clean_input
             found = self.db.search_past_items(query)
@@ -562,12 +639,42 @@ class VoronaAgentCore:
                 "items": found
             }
 
+        # Сценарий: Голосовое удаление задачи
+        if operation == "delete":
+            query = parsed_data.get("search_query") or parsed_data.get("action") or clean_input
+            deleted_item = self.db.find_and_delete_by_query(query)
+            return {
+                "ui_status": "Удалено" if deleted_item else "Не найдено",
+                "operation": "delete",
+                "requires_confirmation": False,
+                "search_query": query,
+                "deleted": deleted_item
+            }
+
+        # Сценарий: Голосовая отметка задачи выполненной
+        if operation == "complete":
+            query = parsed_data.get("search_query") or parsed_data.get("action") or clean_input
+            completed_item = self.db.find_and_complete_by_query(query)
+            return {
+                "ui_status": "Выполнено" if completed_item else "Не найдено",
+                "operation": "complete",
+                "requires_confirmation": False,
+                "search_query": query,
+                "completed": completed_item
+            }
+
+        # Сценарий: Неоднозначный запрос и уточняющий диалог
         if operation == "clarify":
+            question = parsed_data.get("action") or "Уточните, пожалуйста, дату или время."
+            self.clarification_buffer[session_id] = {
+                "original_text": clean_input,
+                "partial_data": parsed_data
+            }
             return {
                 "ui_status": "Уточнение",
                 "operation": "clarify",
                 "requires_confirmation": False,
-                "question": parsed_data.get("action") or "На какое время поставить встречу?"
+                "question": question
             }
 
         intent = parsed_data.get("intent")
@@ -671,6 +778,7 @@ class VoronaAgentCore:
 
     def cancel_pending(self, session_id: str = "default") -> Dict[str, Any]:
         self.pending_buffer.pop(session_id, None)
+        self.clarification_buffer.pop(session_id, None)
         return {
             "ui_status": "Готова",
             "operation": "cancel",
@@ -679,18 +787,17 @@ class VoronaAgentCore:
 
 
 # =====================================================================
-# МОСТ ИНТЕГРАЦИИ С MAIN.PY И VOICE_SERVICE.PY ВТОРОГО БЭКЕНДЕРА
+# МОСТ ИНТЕГРАЦИИ С MAIN.PY И VOICE_SERVICE.PY
 # =====================================================================
 
 _default_db: Optional[DatabaseManager] = None
 _default_agent: Optional[VoronaAgentCore] = None
 
 CONFIRM_WORDS = {"да", "верно", "подтверждаю", "сохрани", "сохранить", "ок", "окей", "ага", "правильно", "точно"}
-CANCEL_WORDS = {"нет", "неверно", "отмена", "отменить", "удали", "сброс", "не надо"}
+CANCEL_WORDS = {"нет", "неверно", "отмена", "отменить", "сброс", "не надо"}
 
 
 def get_shared_agent() -> VoronaAgentCore:
-    """Возвращает единый экземпляр VoronaAgentCore для FastAPI-сервера."""
     global _default_db, _default_agent
     if _default_agent is None:
         _default_db = DatabaseManager(db_path="events.db")
@@ -699,7 +806,7 @@ def get_shared_agent() -> VoronaAgentCore:
 
 
 def format_spoken_response(result: Dict[str, Any]) -> str:
-    """Формирует естественный голосовой ответ на русском языке для озвучки через edge_tts."""
+    """Формирует естественный голосовой ответ на русском языке для озвучки и вывода в UI."""
     ui_status = result.get("ui_status", "")
     operation = result.get("operation", "")
 
@@ -710,14 +817,26 @@ def format_spoken_response(result: Dict[str, Any]) -> str:
         return msg
 
     if ui_status == "Уточнение" or operation == "clarify":
-        return result.get("question") or "Уточните, пожалуйста, дату или время."
+        return result.get("question") or "Уточните, пожалуйста, детали задачи."
+
+    if operation == "delete":
+        deleted = result.get("deleted")
+        if deleted:
+            return f"Удалила запись: «{deleted['action']}»."
+        return f"Не нашла задачу по запросу «{result.get('search_query', '')}» для удаления."
+
+    if operation == "complete":
+        completed = result.get("completed")
+        if completed:
+            return f"Отметила выполненной задачу: «{completed['action']}»!"
+        return f"Не нашла активную задачу «{result.get('search_query', '')}»."
 
     if ui_status == "Подтверждение":
         data = result.get("data") or {}
         kind = "Встреча" if data.get("intent") == "Meeting" else "Задача"
         parts = [f"{kind}: {data.get('action')}"]
         if data.get("date"):
-            parts.append(f"на дату {data['date']}")
+            parts.append(f"на {data['date']}")
         if data.get("time"):
             parts.append(f"в {data['time']}")
         spoken = ", ".join(parts) + "."
@@ -725,10 +844,10 @@ def format_spoken_response(result: Dict[str, Any]) -> str:
         if data.get("date_warning"):
             spoken += f" Внимание: {data['date_warning']}."
         if data.get("date_in_past") == 1:
-            spoken += " Обратите внимание: эта дата уже в прошлом."
+            spoken += " Эта дата уже в прошлом."
         if data.get("conflicts"):
             conflict_names = ", ".join(c["action"] for c in data["conflicts"])
-            spoken += f" Внимание: на это время уже назначено: {conflict_names}."
+            spoken += f" Конфликт времени с: {conflict_names}."
 
         spoken += " Всё верно?"
         return spoken
@@ -736,7 +855,8 @@ def format_spoken_response(result: Dict[str, Any]) -> str:
     if ui_status == "Зафиксировано":
         saved = result.get("saved") or {}
         kind = "Встреча" if saved.get("intent") == "Meeting" else "Задача"
-        return f"Зафиксировано! {kind} «{saved.get('action', '')}» сохранена."
+        cal_note = " и добавлена в Календарь" if saved.get("parsed_date") else ""
+        return f"Зафиксировано! {kind} «{saved.get('action', '')}» сохранена{cal_note}."
 
     if ui_status == "Готова" and operation == "cancel":
         return "Запись отменена. Готова к новому запросу."
@@ -744,22 +864,27 @@ def format_spoken_response(result: Dict[str, Any]) -> str:
     if operation == "list_period":
         items = result.get("items") or []
         period = result.get("period") or {}
+        start_s = period.get("start", "")
+        end_s = period.get("end", "")
+        period_label = start_s if start_s == end_s else f"с {start_s} по {end_s}"
         if not items:
-            return f"На выбранный период ({period.get('start', '')}) запланированных дел нет."
-        lines = [f"Найдено событий: {len(items)}."]
+            return f"На период {period_label} запланированных дел нет."
+        lines = [f"Планы ({period_label}) — всего {len(items)}:"]
         for idx, it in enumerate(items[:5], 1):
             t_str = f" в {it['parsed_time']}" if it.get("parsed_time") else ""
-            lines.append(f"{idx}) {it['action']}{t_str}.")
+            d_str = f" ({it['parsed_date']})" if start_s != end_s and it.get("parsed_date") else ""
+            lines.append(f"{idx}) {it['action']}{d_str}{t_str}")
         return " ".join(lines)
 
     if operation == "search":
         items = result.get("items") or []
         if not items:
-            return "По вашему запросу в прошлых записях ничего не найдено."
+            return "По вашему запросу ничего не найдено."
         top = items[0]
         d_str = f" на {top['parsed_date']}" if top.get("parsed_date") else ""
         t_str = f" в {top['parsed_time']}" if top.get("parsed_time") else ""
-        return f"Нашла запись: «{top['action']}»{d_str}{t_str}."
+        status_str = " (Выполнено)" if top.get("status") == "Done" else ""
+        return f"Нашла: «{top['action']}»{d_str}{t_str}{status_str}."
 
     return "Запрос обработан."
 
@@ -770,16 +895,10 @@ def run_agent_turn(
     session_id: str = "default",
     audio_duration_sec: float = 2.0
 ) -> Dict[str, Any]:
-    """
-    Полноценный цикл обработки для FastAPI (main.py):
-    - Проверяет, не является ли фраза голосовым подтверждением («Верно» / «Отмена»)
-    - Учитывает предыдущий контекст из history при уточнении
-    - Возвращает как текст для озвучки (response), так и структурированный JSON для React UI
-    """
     agent = get_shared_agent()
     clean_lower = user_query.strip().lower().strip(".,!?")
 
-    # 1. Если в буфере ждет задача на подтверждение, проверяем голосовые команды «Верно» / «Отмена»
+    # 1. Если в буфере ждет задача на подтверждение
     if session_id in agent.pending_buffer:
         if clean_lower in CONFIRM_WORDS:
             res = agent.confirm_pending(session_id)
@@ -790,16 +909,8 @@ def run_agent_turn(
             res["spoken_response"] = format_spoken_response(res)
             return res
 
-    # 2. Если предыдущая реплика ассистента в истории была вопросом-уточнением, склеиваем контекст
-    effective_query = user_query
-    if history and len(history) >= 3:
-        prev_assistant = history[-2].get("content", "")
-        prev_user = history[-3].get("content", "")
-        if "Уточните" in prev_assistant or "На какое время" in prev_assistant:
-            effective_query = f"{prev_user} {user_query}"
-
     res = agent.process_user_input(
-        raw_text=effective_query,
+        raw_text=user_query,
         session_id=session_id,
         audio_duration_sec=audio_duration_sec,
         auto_confirm=False
@@ -809,8 +920,5 @@ def run_agent_turn(
 
 
 def run_agent_loop(user_query: str, history: Optional[List[Dict[str, str]]] = None) -> str:
-    """
-    Функция обратной совместимости, которую напрямую импортирует main.py второго бэкендера.
-    """
     turn_result = run_agent_turn(user_query=user_query, history=history)
     return turn_result["spoken_response"]
