@@ -1,31 +1,37 @@
-import { delay, request, useFakeApi } from './client'
+import { request } from './client'
 
-// Отправляет запись голоса на сервер и возвращает распознанный текст
-// (он показывается на экране "Generated text").
-// ВАЖНО: адрес, имя поля и формат ответа - предположение. Уточните у бэкендера.
+// Отправляет запись голоса на сервер и возвращает ответ от нейросети
 export async function recognizeSpeech(audio: Blob): Promise<string> {
-  if (useFakeApi) {
-    // Так можно проверить, что запись действительно работает (консоль: F12)
-    console.log('Записано:', audio.size, 'байт, формат', audio.type)
-    await delay(800)
-    return '(Generated text)'
-  }
   const body = new FormData()
-  body.append('audio', audio, 'record.webm')
-  const result = await request<{ text: string }>('/recognize', { method: 'POST', body })
-  return result.text
+
+  // В main.py бэкенд ждет файл именно под именем 'file'
+  body.append('file', audio, 'record.webm')
+
+  // Отправляем на правильный эндпоинт FastAPI
+  const result = await request<{ response: string }>('/api/voice-chat', {
+    method: 'POST',
+    body,
+  })
+
+  // Бэкенд возвращает текстовый ответ в поле response
+  return result.response
 }
 
-// Сохраняет запись после нажатия на "продолжить" (экран "Запомнила...").
-// ВАЖНО: адрес и формат тела запроса - предположение. Уточните у бэкендера.
-export async function savePlan(text: string): Promise<void> {
-  if (useFakeApi) {
-    await delay(500)
-    return
-  }
-  await request<void>('/plans', {
+// Сохраняет запись после нажатия на "продолжить"
+export async function savePlan(): Promise<void> {
+  // Бэкенду нужен только ID сессии для подтверждения
+  await request<void>('/api/confirm', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({ session_id: 'default' }),
+  })
+}
+
+// Отменяет запись после нажатия на "отменить": сервер перестаёт ждать подтверждения
+export async function cancelPending(): Promise<void> {
+  await request<void>('/api/cancel', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: 'default' }),
   })
 }

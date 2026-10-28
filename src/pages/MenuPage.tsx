@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import Logo from '../components/Logo'
-import { recognizeSpeech, savePlan } from '../api/voice'
+import { cancelPending, recognizeSpeech, savePlan } from '../api/voice'
 import { useVoiceRecorder } from '../hooks/useVoiceRecorder'
 import crow from '../assets/crow.png'
 import crowListening from '../assets/crow-listening.png'
@@ -15,6 +15,12 @@ import './menu-result.css'
 import './menu-saved.css'
 import './menu-error.css'
 
+// Состояния одного экрана:
+// idle      - ждём нажатия на наушники
+// listening - идёт запись (синие наушники)
+// result    - показан ответ сервера, кнопки "продолжить" и "отменить"
+// saved     - после "продолжить": "Запомнила..."
+// error     - что-то пошло не так (в макетах этого экрана нет, пока оформлен как "saved")
 type Mode = 'idle' | 'listening' | 'result' | 'saved' | 'error'
 
 function describeError(error: unknown): string {
@@ -29,7 +35,7 @@ export default function MenuPage() {
   const [mode, setMode] = useState<Mode>('idle')
   const [generatedText, setGeneratedText] = useState('')
   const [errorText, setErrorText] = useState('')
-  const [busy, setBusy] = useState(false) 
+  const [busy, setBusy] = useState(false) // true, пока ждём микрофон или сервер
   const { start, stop, cancel } = useVoiceRecorder()
 
   function fail(error: unknown) {
@@ -61,12 +67,21 @@ export default function MenuPage() {
     if (busy) return
     setBusy(true)
     try {
-      await savePlan(generatedText)
+      await savePlan()
       setMode('saved')
     } catch (error) {
       fail(error)
     } finally {
       setBusy(false)
+    }
+  }
+
+  async function handleCancel() {
+    setMode('idle')
+    try {
+      await cancelPending()
+    } catch {
+      // если сервер не ответил, пользователю это знать не нужно
     }
   }
 
@@ -122,7 +137,7 @@ export default function MenuPage() {
             <button
               className="result-action result-action--cancel"
               disabled={busy}
-              onClick={() => setMode('idle')}
+              onClick={handleCancel}
             >
               отменить
             </button>
