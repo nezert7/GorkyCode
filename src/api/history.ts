@@ -58,6 +58,7 @@ function formatTime(time: string): string {
 // ВАЖНО: названия полей в БД я не видел (файла database.py у меня нет), поэтому ниже
 // перечислены вероятные варианты. Если в консоли браузера (F12) появится предупреждение
 // "Не удалось прочитать запись", пришлите его, и я подставлю точные названия.
+// ВАЖНО: Добавлены правильные названия полей из твоего database.py: 'action', 'parsed_date', 'parsed_time'
 function fromServer(raw: ServerItem, index: number): Plan {
   const intent = asString(pick(raw, ['intent', 'type', 'kind'])).toLowerCase()
   const type: PlanType = intent.includes('meet')
@@ -70,11 +71,13 @@ function fromServer(raw: ServerItem, index: number): Plan {
   const doneFlag = pick(raw, ['is_done', 'done', 'completed'])
   const status: PlanStatus = statusText === 'done' || doneFlag === true ? 'done' : 'pending'
 
-  const dateRaw = asString(pick(raw, ['date', 'due_date', 'start_date', 'scheduled_date', 'deadline', 'datetime', 'start', 'due']))
+  // Сюда добавили 'parsed_date' и 'parsed_time'
+  const dateRaw = asString(pick(raw, ['parsed_date', 'date', 'due_date', 'start_date', 'scheduled_date', 'deadline', 'datetime', 'start', 'due']))
   const timeRaw =
-    asString(pick(raw, ['time', 'start_time', 'due_time'])) || (/[T ](\d{2}:\d{2})/.exec(dateRaw)?.[1] ?? '')
+    asString(pick(raw, ['parsed_time', 'time', 'start_time', 'due_time'])) || (/[T ](\d{2}:\d{2})/.exec(dateRaw)?.[1] ?? '')
 
-  const text = asString(pick(raw, ['title', 'text', 'description', 'name', 'content', 'summary', 'task']))
+  // Сюда добавили 'action' (так колонка называется в твоей SQLite)
+  const text = asString(pick(raw, ['action', 'title', 'text', 'description', 'name', 'content', 'summary', 'task']))
   if (!text) {
     console.warn('Не удалось прочитать запись, пришлите её разработчику:', raw)
   }
@@ -94,11 +97,8 @@ function fromServer(raw: ServerItem, index: number): Plan {
 
 // ---------- Запросы к серверу ----------
 
-// Все запросы к спискам идут через эту функцию. Сервер отвечает { items: [...] }
+// Убрали блок if (useFakeApi), чтобы запрос реально улетал на сервер
 async function fetchPlans(path: string): Promise<Plan[]> {
-  if (useFakeApi) {
-    throw new Error('Не задан адрес сервера: добавьте VITE_API_URL в файл .env и перезапустите npm run dev')
-  }
   const data = await request<{ items?: ServerItem[] }>(path)
   return (data.items ?? []).map(fromServer)
 }
