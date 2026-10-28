@@ -49,7 +49,7 @@ def main():
         min_size=(800, 600)
     )
 
-    webview.start(debug=False)
+    webview.start(debug=True)
 
 
 if __name__ == "__main__":
