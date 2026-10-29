@@ -5,6 +5,9 @@ import time
 import uvicorn
 import webview
 import requests
+from dotenv import load_dotenv
+
+load_dotenv(override=True)
 
 if sys.platform == "darwin":
     try:
@@ -26,7 +29,8 @@ if sys.platform == "darwin":
 
 
 def run_server():
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, log_level="warning")
+    # Слушаем 0.0.0.0, чтобы к этому серверу могли подключаться и другие устройства
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, log_level="warning")
 
 
 def wait_for_server(url: str, timeout: int = 15) -> bool:
@@ -42,21 +46,27 @@ def wait_for_server(url: str, timeout: int = 15) -> bool:
 
 
 def main():
-    server_url = "http://localhost:8000" if sys.platform == "darwin" else "http://127.0.0.1:8000"
-    check_url = "http://127.0.0.1:8000"
+    remote_url = (os.getenv("VORONA_SERVER_URL") or "").strip().rstrip("/")
 
-    server_thread = threading.Thread(target=run_server, daemon=True)
-    server_thread.start()
+    if remote_url:
+        print(f"[*] Подключение к единому удалённому серверу Вороны: {remote_url}")
+        target_url = remote_url
+    else:
+        server_url = "http://localhost:8000" if sys.platform == "darwin" else "http://127.0.0.1:8000"
+        check_url = "http://127.0.0.1:8000"
 
-    print("[*] Запуск локального сервера FastAPI...")
-    if not wait_for_server(check_url):
-        print("[!] Сервер не ответил вовремя. Проверьте порт 8000.")
-        return
+        server_thread = threading.Thread(target=run_server, daemon=True)
+        server_thread.start()
 
-    frontend_index = os.path.join(os.path.dirname(__file__), "static_frontend", "index.html")
-    target_url = server_url if os.path.exists(frontend_index) else f"{server_url}/docs"
+        print("[*] Запуск локального сервера FastAPI (порт 8000)...")
+        if not wait_for_server(check_url):
+            print("[!] Сервер не ответил вовремя. Проверьте порт 8000.")
+            return
 
-    print(f"[*] Сервер запущен. Открытие окна ({target_url})...")
+        frontend_index = os.path.join(os.path.dirname(__file__), "static_frontend", "index.html")
+        target_url = server_url if os.path.exists(frontend_index) else f"{server_url}/docs"
+
+    print(f"[*] Открытие окна ({target_url})...")
 
     webview.create_window(
         title="Ворона — Голосовой ассистент задач и встреч",

@@ -4,6 +4,32 @@ PRODID:-//Vorona Voice Assistant//RU
 CALSCALE:GREGORIAN
 METHOD:PUBLISH
 BEGIN:VEVENT
+UID:vorona-task-13@vorona.local
+DTSTART:20261030T190000
+DTEND:20261030T200000
+SUMMARY:[Задача] Сделать домашние задания
+DESCRIPTION:Создано голосовым ассистентом Ворона (Поставь задачу сделать домашние задания, а завтра 7 часов вечера.) [VORONA_ID:13]
+STATUS:CONFIRMED
+BEGIN:VALARM
+TRIGGER:-PT60M
+ACTION:DISPLAY
+DESCRIPTION:Напоминание: Сделать домашние задания
+END:VALARM
+END:VEVENT
+BEGIN:VEVENT
+UID:vorona-task-12@vorona.local
+DTSTART:20261030T160000
+DTEND:20261030T170000
+SUMMARY:[Встреча] встреча с Иваном
+DESCRIPTION:Создано голосовым ассистентом Ворона (Поставь встречу с Ивана, на завтра в 15.00.) [VORONA_ID:12]
+STATUS:CONFIRMED
+BEGIN:VALARM
+TRIGGER:-PT60M
+ACTION:DISPLAY
+DESCRIPTION:Напоминание: встреча с Иваном
+END:VALARM
+END:VEVENT
+BEGIN:VEVENT
 UID:vorona-task-11@vorona.local
 DTSTART:20261029T132500
 DTEND:20261029T142500
