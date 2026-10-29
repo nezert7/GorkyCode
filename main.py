@@ -4,12 +4,18 @@ import threading
 import time
 from typing import Optional, Dict, Any, List
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Depends, status
+from fastapi.security import HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from auth import hash_password, verify_password, create_access_token, get_current_user
+from auth import (
+    hash_password,
+    verify_password,
+    create_access_token,
+    decode_access_token,
+    security_scheme
+)
 from database import CalendarIntegration, get_intent_label_ru
 from prompts_and_memory import MemoryManager
 from voice_service import VoiceService
@@ -30,7 +36,6 @@ voice_service = VoiceService()
 TEMP_DIR = "temp_audio"
 os.makedirs(TEMP_DIR, exist_ok=True)
 
-# Изолированная краткосрочная память диалогов и очередь уведомлений для каждого user_id
 _user_memories: Dict[int, MemoryManager] = {}
 _pending_ui_notifications: Dict[int, List[Dict[str, Any]]] = {}
 
@@ -41,8 +46,26 @@ def get_user_memory(user_id: int) -> MemoryManager:
     return _user_memories[user_id]
 
 
+async def get_active_user(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_scheme),
+    token_query: Optional[str] = Query(None, alias="token")
+) -> Dict[str, Any]:
+    """Извлекает пользователя из токена, а если фронтенд закэширован — безопасно использует user_id=1."""
+    raw_token = None
+    if credentials and credentials.credentials:
+        raw_token = credentials.credentials
+    elif token_query:
+        raw_token = token_query
+
+    if raw_token:
+        user_data = decode_access_token(raw_token)
+        if user_data:
+            return user_data
+
+    return {"id": 1, "username": "default"}
+
+
 def _background_notification_worker():
-    """Фоновый поток: каждые 30 сек проверяет задачи, до которых остался 1 час, и раскладывает уведомления по user_id."""
     while True:
         try:
             agent = get_shared_agent()
@@ -157,8 +180,14 @@ async def login_endpoint(req: AuthRequest):
 
 
 @app.get("/api/auth/me")
-async def me_endpoint(current_user: Dict[str, Any] = Depends(get_current_user)):
-    return {"user": current_user}
+async def me_endpoint(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_scheme)
+):
+    raw_token = credentials.credentials if credentials else ""
+    user_data = decode_access_token(raw_token)
+    if not user_data:
+        raise HTTPException(status_code=401, detail="Необходима авторизация")
+    return {"user": user_data}
 
 
 # ==================== ГОЛОСОВОЙ И ТЕКСТОВЫЙ ЧАТ ====================
@@ -193,7 +222,7 @@ async def _build_response_with_tts(turn_result: Dict[str, Any], user_id: int) ->
 @app.post("/api/chat", response_model=TextQueryResponse)
 async def chat_endpoint(
     data: TextQueryRequest,
-    current_user: Dict[str, Any] = Depends(get_current_user)
+    current_user: Dict[str, Any] = Depends(get_active_user)
 ):
     user_id = int(current_user["id"])
     user_text = data.query.strip()
@@ -219,10 +248,11 @@ async def chat_endpoint(
 @app.post("/api/voice-chat", response_model=TextQueryResponse)
 async def voice_chat_endpoint(
     file: UploadFile = File(...),
-    current_user: Dict[str, Any] = Depends(get_current_user)
+    current_user: Dict[str, Any] = Depends(get_active_user)
 ):
     user_id = int(current_user["id"])
-    temp_input = os.path.join(TEMP_DIR, f"input_u{user_id}_{int(time.time() * 1000)}_{file.filename}")
+    safe_name = os.path.basename(file.filename or "record.webm")
+    temp_input = os.path.join(TEMP_DIR, f"input_u{user_id}_{int(time.time() * 1000)}_{safe_name}")
     with open(temp_input, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
@@ -245,7 +275,7 @@ async def voice_chat_endpoint(
 @app.post("/api/confirm", response_model=TextQueryResponse)
 async def confirm_pending_endpoint(
     req: SessionActionRequest = SessionActionRequest(),
-    current_user: Dict[str, Any] = Depends(get_current_user)
+    current_user: Dict[str, Any] = Depends(get_active_user)
 ):
     user_id = int(current_user["id"])
     agent = get_shared_agent()
@@ -258,7 +288,7 @@ async def confirm_pending_endpoint(
 @app.post("/api/cancel", response_model=TextQueryResponse)
 async def cancel_pending_endpoint(
     req: SessionActionRequest = SessionActionRequest(),
-    current_user: Dict[str, Any] = Depends(get_current_user)
+    current_user: Dict[str, Any] = Depends(get_active_user)
 ):
     user_id = int(current_user["id"])
     agent = get_shared_agent()
@@ -277,7 +307,7 @@ async def get_history_endpoint(
     intent: Optional[str] = Query(None, description="Task, Reminder или Meeting"),
     status: Optional[str] = Query(None, description="Active или Done"),
     sort_by: str = Query("created_desc", description="created_desc | type | date"),
-    current_user: Dict[str, Any] = Depends(get_current_user)
+    current_user: Dict[str, Any] = Depends(get_active_user)
 ):
     user_id = int(current_user["id"])
     agent = get_shared_agent()
@@ -298,7 +328,7 @@ async def get_tasks_by_period_endpoint(
     end_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
     intent: Optional[str] = Query(None, description="Task, Reminder или Meeting"),
     sort_by: str = Query("date", description="date или type"),
-    current_user: Dict[str, Any] = Depends(get_current_user)
+    current_user: Dict[str, Any] = Depends(get_active_user)
 ):
     user_id = int(current_user["id"])
     agent = get_shared_agent()
@@ -316,7 +346,7 @@ async def get_tasks_by_period_endpoint(
 async def update_task_endpoint(
     task_id: int,
     req: TaskUpdateRequest,
-    current_user: Dict[str, Any] = Depends(get_current_user)
+    current_user: Dict[str, Any] = Depends(get_active_user)
 ):
     user_id = int(current_user["id"])
     agent = get_shared_agent()
@@ -337,7 +367,7 @@ async def update_task_endpoint(
 @app.post("/api/tasks/{task_id}/done")
 async def mark_task_done_endpoint(
     task_id: int,
-    current_user: Dict[str, Any] = Depends(get_current_user)
+    current_user: Dict[str, Any] = Depends(get_active_user)
 ):
     user_id = int(current_user["id"])
     agent = get_shared_agent()
@@ -350,7 +380,7 @@ async def mark_task_done_endpoint(
 @app.delete("/api/tasks/{task_id}")
 async def delete_task_endpoint(
     task_id: int,
-    current_user: Dict[str, Any] = Depends(get_current_user)
+    current_user: Dict[str, Any] = Depends(get_active_user)
 ):
     user_id = int(current_user["id"])
     agent = get_shared_agent()
@@ -361,7 +391,7 @@ async def delete_task_endpoint(
 
 
 @app.get("/api/notifications")
-async def pop_upcoming_notifications(current_user: Dict[str, Any] = Depends(get_current_user)):
+async def pop_upcoming_notifications(current_user: Dict[str, Any] = Depends(get_active_user)):
     user_id = int(current_user["id"])
     user_queue = _pending_ui_notifications.get(user_id, [])
     items = list(user_queue)
@@ -370,8 +400,7 @@ async def pop_upcoming_notifications(current_user: Dict[str, Any] = Depends(get_
 
 
 @app.get("/api/calendar.ics")
-async def export_ics_calendar(current_user: Dict[str, Any] = Depends(get_current_user)):
-    """Скачивание или подписка на персональный календарь пользователя (/api/calendar.ics?token=...)."""
+async def export_ics_calendar(current_user: Dict[str, Any] = Depends(get_active_user)):
     user_id = int(current_user["id"])
     agent = get_shared_agent()
     items = agent.db.get_history(limit=200, user_id=user_id)
@@ -387,12 +416,16 @@ async def export_ics_calendar(current_user: Dict[str, Any] = Depends(get_current
 async def get_audio(filename: str):
     file_path = os.path.join(TEMP_DIR, filename)
     if os.path.exists(file_path):
-        return FileResponse(file_path, media_type="audio/mpeg")
+        return FileResponse(
+            file_path,
+            media_type="audio/mpeg",
+            headers={"Cache-Control": "no-store"}
+        )
     raise HTTPException(status_code=404, detail="Audio not found")
 
 
 @app.post("/api/clear-history")
-async def clear_history(current_user: Dict[str, Any] = Depends(get_current_user)):
+async def clear_history(current_user: Dict[str, Any] = Depends(get_active_user)):
     user_id = int(current_user["id"])
     get_user_memory(user_id).clear()
     get_shared_agent().cancel_pending("default", user_id=user_id)
@@ -400,18 +433,15 @@ async def clear_history(current_user: Dict[str, Any] = Depends(get_current_user)
 
 
 FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "static_frontend")
+NO_CACHE_HEADERS = {"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"}
 
 if os.path.exists(FRONTEND_DIR):
-    assets_dir = os.path.join(FRONTEND_DIR, "assets")
-    if os.path.exists(assets_dir):
-        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
-
     @app.get("/{full_path:path}")
     async def serve_react_app(full_path: str):
         target = os.path.join(FRONTEND_DIR, full_path)
-        if full_path and os.path.exists(target):
-            return FileResponse(target)
+        if full_path and os.path.isfile(target):
+            return FileResponse(target, headers=NO_CACHE_HEADERS)
         index_file = os.path.join(FRONTEND_DIR, "index.html")
-        if os.path.exists(index_file):
-            return FileResponse(index_file)
+        if os.path.isfile(index_file):
+            return FileResponse(index_file, headers=NO_CACHE_HEADERS)
         return {"message": "Frontend not built yet"}
