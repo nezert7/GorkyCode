@@ -9,6 +9,23 @@ export default function StartPage() {
       <div className="stage">
         <Logo variant="start" />
 
+        {/* Кнопка выхода в правом верхнем углу */}
+        <Link 
+          to="/" 
+          style={{
+            position: 'absolute',
+            top: 'calc(var(--u) * 16)',
+            right: 'calc(var(--u) * 16)',
+            fontSize: 'calc(var(--u) * 18)',
+            textDecoration: 'underline',
+            textDecorationThickness: 'calc(var(--u) * 2)',
+            color: 'var(--ink)'
+          }}
+          title="Выйти из профиля"
+        >
+          [ выход ]
+        </Link>
+
         <Link to="/menu" className="start-button">
           <span>START</span>
         </Link>

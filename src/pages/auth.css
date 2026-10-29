@@ -1,0 +1,87 @@
+.auth-box {
+  position: absolute;
+  left: calc(var(--u) * 16);
+  top: calc(var(--u) * 440);
+  width: calc(var(--u) * 733);
+  height: calc(var(--u) * 250);
+  border: calc(var(--u) * 6) solid var(--ink);
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: calc(var(--u) * 16) calc(var(--u) * 24);
+  z-index: 10;
+}
+
+.auth-title {
+  font-size: calc(var(--u) * 28);
+  font-weight: 400;
+  margin-bottom: calc(var(--u) * 16);
+}
+
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  gap: calc(var(--u) * 12);
+}
+
+.auth-row {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--u) * 8);
+}
+
+.auth-row label {
+  width: calc(var(--u) * 160);
+  font-size: calc(var(--u) * 22);
+  text-align: left;
+}
+
+.auth-row input {
+  flex: 1;
+  font-family: inherit;
+  font-size: calc(var(--u) * 14);
+  padding: calc(var(--u) * 4) calc(var(--u) * 8);
+  border: calc(var(--u) * 2) solid var(--ink);
+  background: #fff;
+  outline: none;
+  color: var(--ink);
+}
+
+/* Красный текст для ошибок внутри поля (как на макетах) */
+.auth-row input.input-error::placeholder {
+  color: #c93b3b;
+  opacity: 1;
+}
+
+.auth-submit {
+  font-family: inherit;
+  font-size: calc(var(--u) * 22);
+  padding: calc(var(--u) * 2) calc(var(--u) * 16);
+  border: calc(var(--u) * 2) solid var(--ink);
+  background: #fff;
+  cursor: pointer;
+  margin: calc(var(--u) * 16) auto 0;
+  display: block;
+}
+
+.auth-submit:hover {
+  background: var(--navy);
+  color: var(--bg);
+}
+
+.auth-switch {
+  font-family: inherit;
+  font-size: calc(var(--u) * 14);
+  background: none;
+  border: none;
+  text-decoration: underline;
+  text-decoration-thickness: calc(var(--u) * 2);
+  cursor: pointer;
+  margin-top: calc(var(--u) * 12);
+}
+
+.auth-switch:hover {
+  color: var(--navy);
+}
