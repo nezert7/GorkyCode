@@ -90,7 +90,6 @@ class TursoConnection:
         return cur.execute(sql, params)
 
     def commit(self) -> None:
-        # Turso Pipeline API автоматически фиксирует транзакции
         pass
 
     @staticmethod
@@ -213,10 +212,9 @@ class TextVectorizer:
 
 class CalendarIntegration:
     """
-    Кроссплатформенная синхронизация с системным календарём и уведомлениями:
-    - macOS (darwin): Apple Calendar через osascript + баннеры macOS.
-    - Windows (win32): Microsoft Outlook через PowerShell COM + нативные Toast-баннеры Windows 10/11.
-    - Все ОС: автообновление файла vorona_calendar.ics (RFC 5545).
+    Кроссплатформенная синхронизация с календарём и уведомлениями:
+    - macOS: Apple Calendar (osascript) + нативные баннеры.
+    - Windows: Автообновление .ics файла + нативные Toast-уведомления Windows 10/11.
     """
 
     ICS_FILE_PATH = "vorona_calendar.ics"
@@ -271,35 +269,7 @@ class CalendarIntegration:
             except Exception:
                 return False
 
-        # 2. Windows -> Microsoft Outlook Calendar (через COM-интерфейс PowerShell)
-        elif sys.platform == "win32":
-            win_title = f"[{intent_label}] {raw_title}".replace("'", "''")
-            win_body = f"{intent_label} из голосового ассистента Ворона: {raw_title} [VORONA_ID:{task_id}]".replace("'", "''")
-            start_iso = dt.strftime("%Y-%m-%d %H:%M")
-            try:
-                ps_script = f"""
-                try {{
-                    $outlook = New-Object -ComObject Outlook.Application
-                    $appt = $outlook.CreateItem(1)
-                    $appt.Subject = '{win_title}'
-                    $appt.Body = '{win_body}'
-                    $appt.Start = [datetime]::ParseExact('{start_iso}', 'yyyy-MM-dd HH:mm', $null)
-                    $appt.Duration = 60
-                    $appt.ReminderSet = $true
-                    $appt.ReminderMinutesBeforeStart = 60
-                    $appt.Save()
-                }} catch {{}}
-                """
-                subprocess.Popen(
-                    ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps_script],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL
-                )
-                return True
-            except Exception:
-                return False
-
-        return False
+        return True  # Для Windows и других ОС календарь синхронизируется через .ics подписку
 
     @classmethod
     def remove_event_from_os_calendar(cls, item: Dict[str, Any]) -> bool:
@@ -311,7 +281,6 @@ class CalendarIntegration:
         intent_label = get_intent_label_ru(item.get("intent"))
         marker = f"[VORONA_ID:{task_id}]"
 
-        # 1. macOS -> удаление из Apple Calendar
         if sys.platform == "darwin":
             safe_raw = raw_title.replace('"', '\\"')
             prefixed_title = f"[{intent_label}] {safe_raw}"
@@ -341,35 +310,7 @@ class CalendarIntegration:
             except Exception:
                 return False
 
-        # 2. Windows -> удаление из Microsoft Outlook Calendar
-        elif sys.platform == "win32":
-            win_raw = raw_title.replace("'", "''")
-            win_prefixed = f"[{intent_label}] {win_raw}"
-            try:
-                ps_script = f"""
-                try {{
-                    $outlook = New-Object -ComObject Outlook.Application
-                    $ns = $outlook.GetNamespace('MAPI')
-                    $cal = $ns.GetDefaultFolder(9)
-                    $items = $cal.Items
-                    for ($i = $items.Count; $i -ge 1; $i--) {{
-                        $ev = $items.Item($i)
-                        if (($ev.Body -like '*{marker}*') -or ($ev.Subject -eq '{win_raw}') -or ($ev.Subject -eq '{win_prefixed}')) {{
-                            $ev.Delete()
-                        }}
-                    }}
-                }} catch {{}}
-                """
-                subprocess.Popen(
-                    ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps_script],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL
-                )
-                return True
-            except Exception:
-                return False
-
-        return False
+        return True
 
     @classmethod
     def send_os_notification(cls, item: Dict[str, Any]) -> None:
@@ -379,7 +320,6 @@ class CalendarIntegration:
         title = f"Ворона — {kind} через час"
         msg = f"{raw_action} (в {time_str})" if time_str else raw_action
 
-        # 1. macOS -> нативный баннер со звуком Glass
         if sys.platform == "darwin":
             safe_title = title.replace('"', '\\"')
             safe_msg = msg.replace('"', '\\"')
@@ -393,7 +333,6 @@ class CalendarIntegration:
             except Exception:
                 pass
 
-        # 2. Windows 10/11 -> нативный Toast-баннер в Центре уведомлений (с резервом на BalloonTip)
         elif sys.platform == "win32":
             win_title = title.replace("'", "''").replace('"', "")
             win_msg = msg.replace("'", "''").replace('"', "")
@@ -479,10 +418,7 @@ class CalendarIntegration:
 # =====================================================================
 
 class DatabaseManager:
-    """
-    Мультипользовательский слой хранения (Облако Turso ИЛИ локальный SQLite) +
-    Поиск на NumPy + 3 типа (Task, Reminder, Meeting) + Синхронизация с Календарём.
-    """
+    """Мультипользовательский слой хранения (Turso ИЛИ локальный SQLite) + NumPy поиск."""
 
     def __init__(self, db_path: str = "events.db"):
         self.db_path = db_path
@@ -490,7 +426,6 @@ class DatabaseManager:
         self.turso_token: Optional[str] = None
         self._turso_http: Optional[httpx.Client] = None
 
-        # Подключаем облачную БД Turso, если это рабочий запуск (не unit-тест в :memory:)
         if self._is_real_db():
             raw_url = (os.getenv("TURSO_DATABASE_URL") or "").strip()
             raw_token = (os.getenv("TURSO_AUTH_TOKEN") or "").strip()
@@ -599,7 +534,6 @@ class DatabaseManager:
             conn.commit()
 
     def _migrate_local_sqlite_to_turso_if_needed(self) -> None:
-        """Автоматически переносит локальную базу events.db в облако Turso при первом подключении."""
         if not os.path.exists(self.db_path):
             return
         try:
@@ -652,8 +586,6 @@ class DatabaseManager:
         except Exception as exc:
             print(f"⚠️ [МИГРАЦИЯ] Инфо: {exc}")
 
-    # ==================== УПРАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯМИ ====================
-
     def create_user(self, username: str, password_hash: str) -> Optional[Dict[str, Any]]:
         clean_username = username.strip()
         if not clean_username:
@@ -691,8 +623,6 @@ class DatabaseManager:
                 (user_id,)
             ).fetchone()
             return dict(row) if row else None
-
-    # ==================== УПРАВЛЕНИЕ ЗАДАЧАМИ ПО АККАУНТАМ ====================
 
     def get_item_by_id(self, task_id: int, user_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
         with self._get_conn() as conn:

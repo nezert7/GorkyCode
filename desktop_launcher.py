@@ -29,7 +29,6 @@ if sys.platform == "darwin":
 
 
 def run_server():
-    # Слушаем 0.0.0.0, чтобы к этому серверу могли подключаться и другие устройства
     uvicorn.run("main:app", host="0.0.0.0", port=8000, log_level="warning")
 
 
