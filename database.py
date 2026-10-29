@@ -2,12 +2,18 @@ import os
 import sys
 import sqlite3
 import re
+import json
+import base64
 import hashlib
 import subprocess
+import httpx
 import numpy as np
 import pymorphy3
 from datetime import datetime, timedelta
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Sequence
+from dotenv import load_dotenv
+
+load_dotenv(override=True)
 
 morph = pymorphy3.MorphAnalyzer()
 
@@ -23,14 +29,162 @@ def get_intent_label_ru(intent: Optional[str]) -> str:
     return "Задача"
 
 
+# =====================================================================
+# ДРАЙВЕР ОБЛАЧНОЙ БАЗЫ TURSO (SQLite over HTTPS /v2/pipeline)
+# =====================================================================
+
+class TursoCursor:
+    """Курсор, полностью совместимый с интерфейсом sqlite3.Cursor."""
+
+    def __init__(self, conn: "TursoConnection"):
+        self.conn = conn
+        self._rows: List[Dict[str, Any]] = []
+        self.lastrowid: Optional[int] = None
+        self.rowcount: int = 0
+
+    def execute(self, sql: str, params: Sequence[Any] = ()) -> "TursoCursor":
+        result = self.conn._execute_remote(sql, params)
+        cols = [c.get("name", f"col_{i}") for i, c in enumerate(result.get("cols", []))]
+        raw_rows = result.get("rows", [])
+
+        decoded_rows: List[Dict[str, Any]] = []
+        for r in raw_rows:
+            row_dict = {
+                cols[i]: self.conn._decode_cell(cell)
+                for i, cell in enumerate(r)
+            }
+            decoded_rows.append(row_dict)
+
+        self._rows = decoded_rows
+        raw_last_id = result.get("last_insert_rowid")
+        self.lastrowid = int(raw_last_id) if raw_last_id is not None else None
+        self.rowcount = int(result.get("affected_row_count", 0))
+        return self
+
+    def fetchone(self) -> Optional[Dict[str, Any]]:
+        return self._rows[0] if self._rows else None
+
+    def fetchall(self) -> List[Dict[str, Any]]:
+        return list(self._rows)
+
+
+class TursoConnection:
+    """Соединение с облачной БД Turso через HTTP/1.1 Keep-Alive, совместимое с sqlite3.Connection."""
+
+    def __init__(self, pipeline_url: str, auth_token: str, http_client: httpx.Client):
+        self.pipeline_url = pipeline_url
+        self.auth_token = auth_token
+        self.http_client = http_client
+
+    def __enter__(self) -> "TursoConnection":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        pass
+
+    def cursor(self) -> TursoCursor:
+        return TursoCursor(self)
+
+    def execute(self, sql: str, params: Sequence[Any] = ()) -> TursoCursor:
+        cur = TursoCursor(self)
+        return cur.execute(sql, params)
+
+    def commit(self) -> None:
+        # Turso Pipeline API автоматически фиксирует транзакции
+        pass
+
+    @staticmethod
+    def _encode_arg(val: Any) -> Dict[str, Any]:
+        if val is None:
+            return {"type": "null"}
+        if isinstance(val, bool):
+            return {"type": "integer", "value": "1" if val else "0"}
+        if isinstance(val, int):
+            return {"type": "integer", "value": str(val)}
+        if isinstance(val, float):
+            return {"type": "float", "value": val}
+        if isinstance(val, (bytes, bytearray, memoryview)):
+            return {
+                "type": "blob",
+                "base64": base64.b64encode(bytes(val)).decode("ascii")
+            }
+        return {"type": "text", "value": str(val)}
+
+    @staticmethod
+    def _decode_cell(cell: Dict[str, Any]) -> Any:
+        cell_type = cell.get("type")
+        if cell_type == "null" or cell_type is None:
+            return None
+        if cell_type == "integer":
+            return int(cell["value"])
+        if cell_type == "float":
+            return float(cell["value"])
+        if cell_type == "blob":
+            return base64.b64decode(cell.get("base64", ""))
+        return str(cell.get("value", ""))
+
+    def _execute_remote(self, sql: str, params: Sequence[Any] = ()) -> Dict[str, Any]:
+        stmt: Dict[str, Any] = {"sql": sql}
+        if params:
+            stmt["args"] = [self._encode_arg(p) for p in params]
+
+        payload = {
+            "requests": [
+                {"type": "execute", "stmt": stmt},
+                {"type": "close"}
+            ]
+        }
+        headers = {
+            "Authorization": f"Bearer {self.auth_token}",
+            "Content-Type": "application/json"
+        }
+
+        resp = self.http_client.post(self.pipeline_url, headers=headers, json=payload)
+        if resp.status_code != 200:
+            raise sqlite3.OperationalError(
+                f"Turso HTTP Error {resp.status_code}: {resp.text}"
+            )
+
+        data = resp.json()
+        results = data.get("results", [])
+        if not results:
+            return {"cols": [], "rows": [], "affected_row_count": 0, "last_insert_rowid": None}
+
+        first = results[0]
+        if first.get("type") == "error":
+            err_msg = first.get("error", {}).get("message", "Unknown Turso SQL error")
+            if "UNIQUE" in err_msg.upper() or "CONSTRAINT" in err_msg.upper():
+                raise sqlite3.IntegrityError(err_msg)
+            raise sqlite3.OperationalError(err_msg)
+
+        return first.get("response", {}).get("result", {})
+
+
+# =====================================================================
+# ВЕКТОРИЗАЦИЯ И КАЛЕНДАРЬ
+# =====================================================================
+
 class TextVectorizer:
     """Превращает русский текст в нормализованные леммы и 512-мерный вектор NumPy (float32)."""
+
+    STOP_LEMMAS = {
+        "задача", "встреча", "напоминание", "напомнить", "дело", "событие",
+        "перенести", "изменить", "поменять", "сдвинуть", "отложить", "переименовать",
+        "исправить", "заменить", "обновить", "удалить", "убрать", "отменить",
+        "выполнить", "завершить", "отметить", "сегодня", "завтра", "послезавтра"
+    }
 
     @staticmethod
     def extract_lemmas(text: str) -> str:
         words = re.findall(r"[а-яёa-z0-9]+", text.lower())
         lemmas = [morph.parse(w)[0].normal_form for w in words if len(w) > 1]
         return " ".join(lemmas)
+
+    @classmethod
+    def extract_meaningful_lemmas(cls, text: str) -> List[str]:
+        all_lemmas = cls.extract_lemmas(text).split()
+        meaningful = [l for l in all_lemmas if l not in cls.STOP_LEMMAS]
+        return meaningful if meaningful else all_lemmas
 
     @classmethod
     def text_to_vector(cls, text: str) -> np.ndarray:
@@ -59,17 +213,16 @@ class TextVectorizer:
 
 class CalendarIntegration:
     """
-    Двусторонняя синхронизация с системным календарём:
-    - Создание, удаление и обновление событий в Apple Calendar (macOS) с будильником за 60 минут.
-    - Экспорт актуального состояния в vorona_calendar.ics.
-    - Отправка системных фоновых уведомлений ОС за 1 час до задачи.
+    Кроссплатформенная синхронизация с системным календарём и уведомлениями:
+    - macOS (darwin): Apple Calendar через osascript + баннеры macOS.
+    - Windows (win32): Microsoft Outlook через PowerShell COM + нативные Toast-баннеры Windows 10/11.
+    - Все ОС: автообновление файла vorona_calendar.ics (RFC 5545).
     """
 
     ICS_FILE_PATH = "vorona_calendar.ics"
 
     @classmethod
     def sync_event_to_os_calendar(cls, item: Dict[str, Any]) -> bool:
-        """Добавляет событие в нативный календарь macOS (Apple Calendar) с напоминанием за 1 час."""
         parsed_date = item.get("parsed_date")
         if not parsed_date:
             return False
@@ -78,12 +231,17 @@ class CalendarIntegration:
         parsed_time = item.get("parsed_time") or "09:00"
         raw_title = item.get("action") or "Задача Ворона"
         intent_label = get_intent_label_ru(item.get("intent"))
-        title = f"[{intent_label}] {raw_title}".replace('"', '\\"')
-        description = f"{intent_label} из голосового ассистента Ворона: {raw_title} [VORONA_ID:{task_id}]".replace('"', '\\"')
 
+        try:
+            dt = datetime.strptime(f"{parsed_date} {parsed_time}", "%Y-%m-%d %H:%M")
+        except ValueError:
+            return False
+
+        # 1. macOS -> Apple Calendar
         if sys.platform == "darwin":
+            title = f"[{intent_label}] {raw_title}".replace('"', '\\"')
+            description = f"{intent_label} из голосового ассистента Ворона: {raw_title} [VORONA_ID:{task_id}]".replace('"', '\\"')
             try:
-                dt = datetime.strptime(f"{parsed_date} {parsed_time}", "%Y-%m-%d %H:%M")
                 applescript = f'''
                 tell application "Calendar"
                     if (count of calendars) > 0 then
@@ -112,21 +270,51 @@ class CalendarIntegration:
                 return True
             except Exception:
                 return False
+
+        # 2. Windows -> Microsoft Outlook Calendar (через COM-интерфейс PowerShell)
+        elif sys.platform == "win32":
+            win_title = f"[{intent_label}] {raw_title}".replace("'", "''")
+            win_body = f"{intent_label} из голосового ассистента Ворона: {raw_title} [VORONA_ID:{task_id}]".replace("'", "''")
+            start_iso = dt.strftime("%Y-%m-%d %H:%M")
+            try:
+                ps_script = f"""
+                try {{
+                    $outlook = New-Object -ComObject Outlook.Application
+                    $appt = $outlook.CreateItem(1)
+                    $appt.Subject = '{win_title}'
+                    $appt.Body = '{win_body}'
+                    $appt.Start = [datetime]::ParseExact('{start_iso}', 'yyyy-MM-dd HH:mm', $null)
+                    $appt.Duration = 60
+                    $appt.ReminderSet = $true
+                    $appt.ReminderMinutesBeforeStart = 60
+                    $appt.Save()
+                }} catch {{}}
+                """
+                subprocess.Popen(
+                    ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps_script],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+                return True
+            except Exception:
+                return False
+
         return False
 
     @classmethod
     def remove_event_from_os_calendar(cls, item: Dict[str, Any]) -> bool:
-        """Удаляет событие из нативного календаря macOS по ID или названию задачи."""
         if not item:
             return False
 
         task_id = item.get("id", 0)
-        raw_title = (item.get("action") or "").replace('"', '\\"')
+        raw_title = item.get("action") or ""
         intent_label = get_intent_label_ru(item.get("intent"))
-        prefixed_title = f"[{intent_label}] {raw_title}"
         marker = f"[VORONA_ID:{task_id}]"
 
+        # 1. macOS -> удаление из Apple Calendar
         if sys.platform == "darwin":
+            safe_raw = raw_title.replace('"', '\\"')
+            prefixed_title = f"[{intent_label}] {safe_raw}"
             try:
                 applescript = f'''
                 tell application "Calendar"
@@ -135,9 +323,9 @@ class CalendarIntegration:
                             try
                                 delete (every event whose description contains "{marker}")
                             end try
-                            if "{raw_title}" is not "" then
+                            if "{safe_raw}" is not "" then
                                 try
-                                    delete (every event whose summary is "{raw_title}" or summary is "{prefixed_title}")
+                                    delete (every event whose summary is "{safe_raw}" or summary is "{prefixed_title}")
                                 end try
                             end if
                         end tell
@@ -152,20 +340,51 @@ class CalendarIntegration:
                 return True
             except Exception:
                 return False
+
+        # 2. Windows -> удаление из Microsoft Outlook Calendar
+        elif sys.platform == "win32":
+            win_raw = raw_title.replace("'", "''")
+            win_prefixed = f"[{intent_label}] {win_raw}"
+            try:
+                ps_script = f"""
+                try {{
+                    $outlook = New-Object -ComObject Outlook.Application
+                    $ns = $outlook.GetNamespace('MAPI')
+                    $cal = $ns.GetDefaultFolder(9)
+                    $items = $cal.Items
+                    for ($i = $items.Count; $i -ge 1; $i--) {{
+                        $ev = $items.Item($i)
+                        if (($ev.Body -like '*{marker}*') -or ($ev.Subject -eq '{win_raw}') -or ($ev.Subject -eq '{win_prefixed}')) {{
+                            $ev.Delete()
+                        }}
+                    }}
+                }} catch {{}}
+                """
+                subprocess.Popen(
+                    ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps_script],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+                return True
+            except Exception:
+                return False
+
         return False
 
     @classmethod
     def send_os_notification(cls, item: Dict[str, Any]) -> None:
-        """Отправляет нативное фоновое уведомление ОС за 1 час до начала события."""
         kind = get_intent_label_ru(item.get("intent"))
-        action = (item.get("action") or "Событие").replace('"', '\\"')
+        raw_action = item.get("action") or "Событие"
         time_str = item.get("parsed_time") or ""
         title = f"Ворона — {kind} через час"
-        msg = f"{action} (в {time_str})" if time_str else action
+        msg = f"{raw_action} (в {time_str})" if time_str else raw_action
 
+        # 1. macOS -> нативный баннер со звуком Glass
         if sys.platform == "darwin":
+            safe_title = title.replace('"', '\\"')
+            safe_msg = msg.replace('"', '\\"')
             try:
-                script = f'display notification "{msg}" with title "{title}" sound name "Glass"'
+                script = f'display notification "{safe_msg}" with title "{safe_title}" sound name "Glass"'
                 subprocess.Popen(
                     ["osascript", "-e", script],
                     stdout=subprocess.DEVNULL,
@@ -173,14 +392,34 @@ class CalendarIntegration:
                 )
             except Exception:
                 pass
+
+        # 2. Windows 10/11 -> нативный Toast-баннер в Центре уведомлений (с резервом на BalloonTip)
         elif sys.platform == "win32":
+            win_title = title.replace("'", "''").replace('"', "")
+            win_msg = msg.replace("'", "''").replace('"', "")
             try:
-                ps_cmd = (
-                    f"[reflection.assembly]::loadwithpartialname('System.Windows.Forms');"
-                    f"[System.Windows.Forms.MessageBox]::Show('{msg}', '{title}')"
-                )
+                ps_toast = f"""
+                try {{
+                    [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+                    [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
+                    $xml = New-Object Windows.Data.Xml.Dom.XmlDocument
+                    $template = "<toast><visual><binding template='ToastGeneric'><text>{win_title}</text><text>{win_msg}</text></binding></visual><audio src='ms-winsoundevent:Notification.Default'/></toast>"
+                    $xml.LoadXml($template)
+                    $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
+                    [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Vorona Voice Assistant').Show($toast)
+                }} catch {{
+                    Add-Type -AssemblyName System.Windows.Forms
+                    Add-Type -AssemblyName System.Drawing
+                    $notify = New-Object System.Windows.Forms.NotifyIcon
+                    $notify.Icon = [System.Drawing.SystemIcons]::Information
+                    $notify.Visible = $true
+                    $notify.ShowBalloonTip(7000, '{win_title}', '{win_msg}', [System.Windows.Forms.ToolTipIcon]::Info)
+                    Start-Sleep -Seconds 8
+                    $notify.Dispose()
+                }}
+                """
                 subprocess.Popen(
-                    ["powershell", "-WindowStyle", "Hidden", "-Command", ps_cmd],
+                    ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps_toast],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL
                 )
@@ -189,7 +428,6 @@ class CalendarIntegration:
 
     @classmethod
     def export_all_to_ics(cls, items: List[Dict[str, Any]]) -> str:
-        """Генерирует и сохраняет .ics файл только для существующих задач."""
         lines = [
             "BEGIN:VCALENDAR",
             "VERSION:2.0",
@@ -236,17 +474,43 @@ class CalendarIntegration:
         return ics_content
 
 
+# =====================================================================
+# МЕНЕДЖЕР БАЗЫ ДАННЫХ (Turso Cloud SQLite + Local SQLite Fallback)
+# =====================================================================
+
 class DatabaseManager:
     """
-    Слой хранения данных SQLite + Поиск на NumPy + 3 типа (Task, Reminder, Meeting) +
-    Синхронизация с Календарём при создании, изменении и удалении.
+    Мультипользовательский слой хранения (Облако Turso ИЛИ локальный SQLite) +
+    Поиск на NumPy + 3 типа (Task, Reminder, Meeting) + Синхронизация с Календарём.
     """
 
     def __init__(self, db_path: str = "events.db"):
         self.db_path = db_path
+        self.turso_url: Optional[str] = None
+        self.turso_token: Optional[str] = None
+        self._turso_http: Optional[httpx.Client] = None
+
+        # Подключаем облачную БД Turso, если это рабочий запуск (не unit-тест в :memory:)
+        if self._is_real_db():
+            raw_url = (os.getenv("TURSO_DATABASE_URL") or "").strip()
+            raw_token = (os.getenv("TURSO_AUTH_TOKEN") or "").strip()
+            if raw_url and raw_token:
+                clean_url = re.sub(r"^libsql://", "https://", raw_url).rstrip("/")
+                if not clean_url.endswith("/v2/pipeline"):
+                    clean_url += "/v2/pipeline"
+                self.turso_url = clean_url
+                self.turso_token = raw_token
+                self._turso_http = httpx.Client(timeout=15.0)
+                print(f"☁️ [ОБЛАЧНАЯ БД] Подключена база Turso SQLite: {raw_url}")
+
         self._init_db()
 
-    def _get_conn(self) -> sqlite3.Connection:
+        if self.turso_url:
+            self._migrate_local_sqlite_to_turso_if_needed()
+
+    def _get_conn(self):
+        if self.turso_url and self.turso_token and self._turso_http:
+            return TursoConnection(self.turso_url, self.turso_token, self._turso_http)
         conn = sqlite3.connect(self.db_path, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         return conn
@@ -255,8 +519,16 @@ class DatabaseManager:
         return self.db_path != ":memory:" and not self.db_path.startswith("test")
 
     def _init_db(self) -> None:
-        """Создаёт таблицу tasks и автоматически мигрирует старую схему под 3 типа ('Task','Meeting','Reminder') и поле notified."""
         with self._get_conn() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username      TEXT    NOT NULL UNIQUE COLLATE NOCASE,
+                    password_hash TEXT    NOT NULL,
+                    created_at    TEXT    NOT NULL
+                );
+            """)
+
             row = conn.execute(
                 "SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'"
             ).fetchone()
@@ -268,6 +540,7 @@ class DatabaseManager:
                     conn.execute("""
                         CREATE TABLE tasks (
                             id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                            user_id      INTEGER NOT NULL DEFAULT 1,
                             intent       TEXT    NOT NULL CHECK (intent IN ('Task','Meeting','Reminder')),
                             raw_text     TEXT    NOT NULL,
                             action       TEXT    NOT NULL,
@@ -284,10 +557,10 @@ class DatabaseManager:
                     """)
                     conn.execute("""
                         INSERT INTO tasks (
-                            id, intent, raw_text, action, parsed_date, parsed_time,
+                            id, user_id, intent, raw_text, action, parsed_date, parsed_time,
                             date_in_past, status, parse_method, created_at, lemmas, embedding
                         )
-                        SELECT id, intent, raw_text, action, parsed_date, parsed_time,
+                        SELECT id, 1, intent, raw_text, action, parsed_date, parsed_time,
                                date_in_past, status, parse_method, created_at, lemmas, embedding
                         FROM tasks_old;
                     """)
@@ -297,11 +570,14 @@ class DatabaseManager:
                     cols = [c["name"] for c in conn.execute("PRAGMA table_info(tasks)").fetchall()]
                     if "notified" not in cols:
                         conn.execute("ALTER TABLE tasks ADD COLUMN notified INTEGER NOT NULL DEFAULT 0;")
-                        conn.commit()
+                    if "user_id" not in cols:
+                        conn.execute("ALTER TABLE tasks ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1;")
+                    conn.commit()
             else:
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS tasks (
                         id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id      INTEGER NOT NULL DEFAULT 1,
                         intent       TEXT    NOT NULL CHECK (intent IN ('Task','Meeting','Reminder')),
                         raw_text     TEXT    NOT NULL,
                         action       TEXT    NOT NULL,
@@ -319,18 +595,125 @@ class DatabaseManager:
 
             conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks (created_at DESC);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_date ON tasks (parsed_date);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_user ON tasks (user_id, created_at DESC);")
             conn.commit()
 
-    def get_item_by_id(self, task_id: int) -> Optional[Dict[str, Any]]:
+    def _migrate_local_sqlite_to_turso_if_needed(self) -> None:
+        """Автоматически переносит локальную базу events.db в облако Turso при первом подключении."""
+        if not os.path.exists(self.db_path):
+            return
+        try:
+            with self._get_conn() as cloud_conn:
+                cloud_tasks_cnt = cloud_conn.execute("SELECT COUNT(*) AS cnt FROM tasks").fetchone()
+                if cloud_tasks_cnt and int(cloud_tasks_cnt["cnt"]) > 0:
+                    return
+
+                local_conn = sqlite3.connect(self.db_path)
+                local_conn.row_factory = sqlite3.Row
+
+                try:
+                    local_users = local_conn.execute("SELECT * FROM users").fetchall()
+                    for u in local_users:
+                        cloud_conn.execute(
+                            "INSERT OR IGNORE INTO users (id, username, password_hash, created_at) VALUES (?, ?, ?, ?)",
+                            (u["id"], u["username"], u["password_hash"], u["created_at"])
+                        )
+                except Exception:
+                    pass
+
+                local_tasks = local_conn.execute("SELECT * FROM tasks").fetchall()
+                for t in local_tasks:
+                    t_dict = dict(t)
+                    cloud_conn.execute("""
+                        INSERT OR IGNORE INTO tasks (
+                            id, user_id, intent, raw_text, action, parsed_date, parsed_time,
+                            date_in_past, status, parse_method, created_at, lemmas, embedding, notified
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        t_dict.get("id"),
+                        t_dict.get("user_id", 1),
+                        t_dict.get("intent", "Task"),
+                        t_dict.get("raw_text", ""),
+                        t_dict.get("action", ""),
+                        t_dict.get("parsed_date"),
+                        t_dict.get("parsed_time"),
+                        t_dict.get("date_in_past", 0),
+                        t_dict.get("status", "Active"),
+                        t_dict.get("parse_method", "llm"),
+                        t_dict.get("created_at", datetime.now().strftime("%Y-%m-%dT%H:%M:%S")),
+                        t_dict.get("lemmas"),
+                        t_dict.get("embedding"),
+                        t_dict.get("notified", 0)
+                    ))
+                local_conn.close()
+                if local_tasks:
+                    print(f"🚀 [МИГРАЦИЯ В ОБЛАКО] Перенесено {len(local_tasks)} задач из локальной БД в Turso!")
+        except Exception as exc:
+            print(f"⚠️ [МИГРАЦИЯ] Инфо: {exc}")
+
+    # ==================== УПРАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯМИ ====================
+
+    def create_user(self, username: str, password_hash: str) -> Optional[Dict[str, Any]]:
+        clean_username = username.strip()
+        if not clean_username:
+            return None
+        created_at = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        try:
+            with self._get_conn() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
+                    (clean_username, password_hash, created_at)
+                )
+                conn.commit()
+                new_user_id = cur.lastrowid
+                return {
+                    "id": new_user_id,
+                    "username": clean_username,
+                    "created_at": created_at
+                }
+        except sqlite3.IntegrityError:
+            return None
+
+    def get_user_by_username(self, username: str) -> Optional[Dict[str, Any]]:
         with self._get_conn() as conn:
             row = conn.execute(
-                """
-                SELECT id, intent, raw_text, action, parsed_date, parsed_time,
-                       date_in_past, status, parse_method, created_at, notified
-                FROM tasks WHERE id = ?
-                """,
-                (task_id,)
+                "SELECT id, username, password_hash, created_at FROM users WHERE username = ?",
+                (username.strip(),)
             ).fetchone()
+            return dict(row) if row else None
+
+    def get_user_by_id(self, user_id: int) -> Optional[Dict[str, Any]]:
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT id, username, created_at FROM users WHERE id = ?",
+                (user_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    # ==================== УПРАВЛЕНИЕ ЗАДАЧАМИ ПО АККАУНТАМ ====================
+
+    def get_item_by_id(self, task_id: int, user_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        with self._get_conn() as conn:
+            if user_id is not None:
+                row = conn.execute(
+                    """
+                    SELECT id, user_id, intent, raw_text, action, parsed_date, parsed_time,
+                           date_in_past, status, parse_method, created_at, notified
+                    FROM tasks WHERE id = ? AND user_id = ?
+                    """,
+                    (task_id, user_id)
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    """
+                    SELECT id, user_id, intent, raw_text, action, parsed_date, parsed_time,
+                           date_in_past, status, parse_method, created_at, notified
+                    FROM tasks WHERE id = ?
+                    """,
+                    (task_id,)
+                ).fetchone()
             return dict(row) if row else None
 
     def save_confirmed_item(
@@ -342,7 +725,8 @@ class DatabaseManager:
         parsed_time: Optional[str],
         date_in_past: int = 0,
         parse_method: str = "llm",
-        now_override: Optional[datetime] = None
+        now_override: Optional[datetime] = None,
+        user_id: int = 1
     ) -> Dict[str, Any]:
         if intent not in VALID_INTENTS:
             intent = "Task"
@@ -358,12 +742,12 @@ class DatabaseManager:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO tasks (
-                    intent, raw_text, action, parsed_date, parsed_time,
+                    user_id, intent, raw_text, action, parsed_date, parsed_time,
                     date_in_past, status, parse_method, created_at, lemmas, embedding, notified
                 )
-                VALUES (?, ?, ?, ?, ?, ?, 'Active', ?, ?, ?, ?, 0)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'Active', ?, ?, ?, ?, 0)
             """, (
-                intent, raw_text, action, parsed_date, parsed_time,
+                user_id, intent, raw_text, action, parsed_date, parsed_time,
                 date_in_past, parse_method, created_at, lemmas, vector_bytes
             ))
             conn.commit()
@@ -371,6 +755,7 @@ class DatabaseManager:
 
         saved = {
             "id": new_id,
+            "user_id": user_id,
             "intent": intent,
             "raw_text": raw_text,
             "action": action,
@@ -384,7 +769,7 @@ class DatabaseManager:
 
         if self._is_real_db():
             CalendarIntegration.sync_event_to_os_calendar(saved)
-            CalendarIntegration.export_all_to_ics(self.get_history(limit=200))
+            CalendarIntegration.export_all_to_ics(self.get_history(limit=200, user_id=user_id))
 
         return saved
 
@@ -395,10 +780,10 @@ class DatabaseManager:
         parsed_date: Optional[str] = "__UNSET__",
         parsed_time: Optional[str] = "__UNSET__",
         intent: Optional[str] = None,
-        status: Optional[str] = None
+        status: Optional[str] = None,
+        user_id: int = 1
     ) -> Optional[Dict[str, Any]]:
-        """Обновляет существующую задачу/напоминание/встречу и синхронизирует изменения с Календарём."""
-        old_item = self.get_item_by_id(task_id)
+        old_item = self.get_item_by_id(task_id, user_id=user_id)
         if not old_item:
             return None
 
@@ -408,7 +793,16 @@ class DatabaseManager:
         new_intent = intent if intent in VALID_INTENTS else old_item["intent"]
         new_status = status if status in ("Active", "Done") else old_item["status"]
 
-        today_str = datetime.now().strftime("%Y-%m-%d")
+        now_dt = datetime.now()
+        today_str = now_dt.strftime("%Y-%m-%d")
+
+        if new_time and not new_date and parsed_date == "__UNSET__":
+            now_time_str = now_dt.strftime("%H:%M")
+            if new_time <= now_time_str:
+                new_date = (now_dt + timedelta(days=1)).strftime("%Y-%m-%d")
+            else:
+                new_date = today_str
+
         date_in_past = 1 if (new_date and new_date < today_str) else 0
 
         search_target = f"{new_action} {old_item['raw_text']}"
@@ -420,56 +814,171 @@ class DatabaseManager:
                 UPDATE tasks
                 SET action = ?, parsed_date = ?, parsed_time = ?, intent = ?,
                     status = ?, date_in_past = ?, lemmas = ?, embedding = ?, notified = 0
-                WHERE id = ?
+                WHERE id = ? AND user_id = ?
             """, (
                 new_action, new_date, new_time, new_intent,
-                new_status, date_in_past, lemmas, vector_bytes, task_id
+                new_status, date_in_past, lemmas, vector_bytes, task_id, user_id
             ))
             conn.commit()
 
-        updated_item = self.get_item_by_id(task_id)
+        updated_item = self.get_item_by_id(task_id, user_id=user_id)
 
         if self._is_real_db() and updated_item:
             CalendarIntegration.remove_event_from_os_calendar(old_item)
             if updated_item.get("parsed_date") and updated_item.get("status") == "Active":
                 CalendarIntegration.sync_event_to_os_calendar(updated_item)
-            CalendarIntegration.export_all_to_ics(self.get_history(limit=200))
+            CalendarIntegration.export_all_to_ics(self.get_history(limit=200, user_id=user_id))
 
         return updated_item
 
+    def find_best_matching_item(
+        self,
+        query_text: Optional[str] = None,
+        target_id: Optional[int] = None,
+        intent_hint: Optional[str] = None,
+        only_active: bool = True,
+        user_id: int = 1
+    ) -> Optional[Dict[str, Any]]:
+        if target_id is not None:
+            try:
+                exact_item = self.get_item_by_id(int(target_id), user_id=user_id)
+                if exact_item:
+                    return exact_item
+            except (ValueError, TypeError):
+                pass
+
+        with self._get_conn() as conn:
+            sql = (
+                "SELECT * FROM tasks WHERE user_id = ? AND status = 'Active' ORDER BY created_at DESC, id DESC"
+                if only_active
+                else "SELECT * FROM tasks WHERE user_id = ? ORDER BY status ASC, created_at DESC, id DESC"
+            )
+            rows = conn.execute(sql, (user_id,)).fetchall()
+
+        if not rows and only_active:
+            with self._get_conn() as conn:
+                rows = conn.execute(
+                    "SELECT * FROM tasks WHERE user_id = ? ORDER BY created_at DESC, id DESC",
+                    (user_id,)
+                ).fetchall()
+
+        if not rows:
+            return None
+
+        clean_q = (query_text or "").strip().lower()
+        meaningful_lemmas = set(TextVectorizer.extract_meaningful_lemmas(clean_q))
+        raw_words = [
+            w for w in re.findall(r"[а-яёa-z0-9]+", clean_q)
+            if len(w) >= 3 and morph.parse(w)[0].normal_form not in TextVectorizer.STOP_LEMMAS
+        ]
+
+        if not meaningful_lemmas or clean_q in ("ее", "её", "эту", "последнюю", "задачу", "встречу", "напоминание"):
+            if intent_hint in VALID_INTENTS:
+                for r in rows:
+                    if r["intent"] == intent_hint:
+                        item = dict(r)
+                        item.pop("embedding", None)
+                        return item
+            item = dict(rows[0])
+            item.pop("embedding", None)
+            return item
+
+        query_vec = TextVectorizer.text_to_vector(" ".join(meaningful_lemmas) or clean_q)
+        matrix = np.vstack([
+            np.frombuffer(r["embedding"], dtype=np.float32)
+            if r["embedding"] and len(r["embedding"]) == VECTOR_DIM * 4
+            else TextVectorizer.text_to_vector(f"{r['action']} {r['raw_text']}")
+            for r in rows
+        ])
+        cosine_scores = np.dot(matrix, query_vec)
+
+        best_item = None
+        best_score = -1.0
+
+        for idx, row in enumerate(rows):
+            action_lower = (row["action"] or "").lower()
+            raw_lower = (row["raw_text"] or "").lower()
+            row_lemmas = set((row["lemmas"] or TextVectorizer.extract_lemmas(f"{action_lower} {raw_lower}")).split())
+
+            score = float(cosine_scores[idx]) * 0.55
+
+            common_lemmas = meaningful_lemmas.intersection(row_lemmas)
+            if common_lemmas:
+                score += 0.50 * (len(common_lemmas) / max(len(meaningful_lemmas), 1))
+
+            for w in raw_words:
+                stem = w[:4] if len(w) >= 5 else w[:3]
+                if w in action_lower or w in raw_lower:
+                    score += 0.35
+                elif len(stem) >= 3 and (stem in action_lower or stem in raw_lower):
+                    score += 0.22
+
+            if intent_hint and row["intent"] == intent_hint:
+                score += 0.12
+
+            if row["status"] == "Active":
+                score += 0.08
+
+            if score > best_score:
+                best_score = score
+                best_item = dict(row)
+                best_item.pop("embedding", None)
+
+        if best_item and best_score >= 0.18:
+            return best_item
+
+        if intent_hint in VALID_INTENTS:
+            typed_rows = [r for r in rows if r["intent"] == intent_hint]
+            if len(typed_rows) == 1:
+                item = dict(typed_rows[0])
+                item.pop("embedding", None)
+                return item
+        if len(rows) == 1:
+            item = dict(rows[0])
+            item.pop("embedding", None)
+            return item
+
+        return None
+
     def find_and_update_by_query(
         self,
-        query_text: str,
+        query_text: Optional[str],
+        target_id: Optional[int] = None,
         new_action: Optional[str] = None,
         new_date: Optional[str] = None,
         new_time: Optional[str] = None,
-        new_intent: Optional[str] = None
+        new_intent: Optional[str] = None,
+        intent_hint: Optional[str] = None,
+        user_id: int = 1
     ) -> Optional[Dict[str, Any]]:
-        """Находит задачу по голосовому описанию и обновляет её поля."""
-        candidates = self.search_past_items(query_text, top_k=1, only_active=True)
-        if not candidates:
-            candidates = self.search_past_items(query_text, top_k=1, only_active=False)
-        if not candidates:
+        target = self.find_best_matching_item(
+            query_text=query_text,
+            target_id=target_id,
+            intent_hint=intent_hint,
+            only_active=True,
+            user_id=user_id
+        )
+        if not target:
             return None
 
-        target = candidates[0]
         return self.update_item(
             task_id=target["id"],
             action=new_action if new_action else None,
             parsed_date=new_date if new_date is not None else "__UNSET__",
             parsed_time=new_time if new_time is not None else "__UNSET__",
-            intent=new_intent if new_intent in VALID_INTENTS else None
+            intent=new_intent if new_intent in VALID_INTENTS else None,
+            user_id=user_id
         )
 
-    def check_meeting_conflict(self, parsed_date: str, parsed_time: str) -> List[Dict[str, Any]]:
+    def check_meeting_conflict(self, parsed_date: str, parsed_time: str, user_id: int = 1) -> List[Dict[str, Any]]:
         if not parsed_date or not parsed_time:
             return []
         with self._get_conn() as conn:
             rows = conn.execute("""
-                SELECT id, intent, action, parsed_date, parsed_time
+                SELECT id, user_id, intent, action, parsed_date, parsed_time
                 FROM tasks
-                WHERE parsed_date = ? AND parsed_time = ? AND status = 'Active'
-            """, (parsed_date, parsed_time)).fetchall()
+                WHERE user_id = ? AND parsed_date = ? AND parsed_time = ? AND status = 'Active'
+            """, (user_id, parsed_date, parsed_time)).fetchall()
             return [dict(r) for r in rows]
 
     def get_items_by_period(
@@ -477,15 +986,16 @@ class DatabaseManager:
         start_date: str,
         end_date: str,
         intent_filter: Optional[str] = None,
-        sort_by: str = "date"
+        sort_by: str = "date",
+        user_id: int = 1
     ) -> List[Dict[str, Any]]:
         query = """
-            SELECT id, intent, raw_text, action, parsed_date, parsed_time,
+            SELECT id, user_id, intent, raw_text, action, parsed_date, parsed_time,
                    date_in_past, status, parse_method, created_at
             FROM tasks
-            WHERE parsed_date >= ? AND parsed_date <= ? AND status = 'Active'
+            WHERE user_id = ? AND parsed_date >= ? AND parsed_date <= ? AND status = 'Active'
         """
-        params: List[Any] = [start_date, end_date]
+        params: List[Any] = [user_id, start_date, end_date]
 
         if intent_filter in VALID_INTENTS:
             query += " AND intent = ?"
@@ -504,25 +1014,27 @@ class DatabaseManager:
         self,
         query_text: str,
         top_k: int = 5,
-        only_active: bool = False
+        only_active: bool = False,
+        user_id: int = 1
     ) -> List[Dict[str, Any]]:
         with self._get_conn() as conn:
             sql = (
-                "SELECT * FROM tasks WHERE status = 'Active' ORDER BY created_at DESC"
+                "SELECT * FROM tasks WHERE user_id = ? AND status = 'Active' ORDER BY created_at DESC"
                 if only_active
-                else "SELECT * FROM tasks ORDER BY created_at DESC"
+                else "SELECT * FROM tasks WHERE user_id = ? ORDER BY created_at DESC"
             )
-            rows = conn.execute(sql).fetchall()
+            rows = conn.execute(sql, (user_id,)).fetchall()
 
         if not rows or not query_text.strip():
             return []
 
         query_vec = TextVectorizer.text_to_vector(query_text)
-        query_lemmas = set(TextVectorizer.extract_lemmas(query_text).split())
+        query_lemmas = set(TextVectorizer.extract_meaningful_lemmas(query_text))
 
         matrix = np.vstack([
-            np.frombuffer(r["embedding"], dtype=np.float32) if r["embedding"]
-            else np.zeros(VECTOR_DIM, dtype=np.float32)
+            np.frombuffer(r["embedding"], dtype=np.float32)
+            if r["embedding"] and len(r["embedding"]) == VECTOR_DIM * 4
+            else TextVectorizer.text_to_vector(f"{r['action']} {r['raw_text']}")
             for r in rows
         ])
 
@@ -535,9 +1047,12 @@ class DatabaseManager:
 
             common_lemmas = query_lemmas.intersection(row_lemmas)
             if common_lemmas:
-                score += 0.25 * (len(common_lemmas) / max(len(query_lemmas), 1))
+                score += 0.30 * (len(common_lemmas) / max(len(query_lemmas), 1))
 
-            if score >= 0.20:
+            if query_text.strip().lower() in (row["action"] or "").lower():
+                score += 0.35
+
+            if score >= 0.18:
                 item_dict = dict(row)
                 item_dict.pop("embedding", None)
                 item_dict["similarity"] = round(min(score, 1.0), 3)
@@ -552,15 +1067,16 @@ class DatabaseManager:
         offset: int = 0,
         intent_filter: Optional[str] = None,
         status_filter: Optional[str] = None,
-        sort_by: str = "created_desc"
+        sort_by: str = "created_desc",
+        user_id: int = 1
     ) -> List[Dict[str, Any]]:
         query = """
-            SELECT id, intent, raw_text, action, parsed_date, parsed_time,
+            SELECT id, user_id, intent, raw_text, action, parsed_date, parsed_time,
                    date_in_past, status, parse_method, created_at
             FROM tasks
-            WHERE 1=1
+            WHERE user_id = ?
         """
-        params: List[Any] = []
+        params: List[Any] = [user_id]
 
         if intent_filter in VALID_INTENTS:
             query += " AND intent = ?"
@@ -584,73 +1100,87 @@ class DatabaseManager:
             rows = conn.execute(query, params).fetchall()
             return [dict(r) for r in rows]
 
-    def mark_done(self, task_id: int) -> bool:
-        """Переводит задачу в статус Done и обновляет календарь."""
-        item = self.get_item_by_id(task_id)
+    def mark_done(self, task_id: int, user_id: int = 1) -> bool:
+        item = self.get_item_by_id(task_id, user_id=user_id)
         if not item:
             return False
 
         with self._get_conn() as conn:
-            cur = conn.execute("UPDATE tasks SET status = 'Done' WHERE id = ?", (task_id,))
+            cur = conn.execute(
+                "UPDATE tasks SET status = 'Done' WHERE id = ? AND user_id = ?",
+                (task_id, user_id)
+            )
             conn.commit()
             ok = cur.rowcount > 0
 
         if ok and self._is_real_db():
-            CalendarIntegration.export_all_to_ics(self.get_history(limit=200))
+            CalendarIntegration.export_all_to_ics(self.get_history(limit=200, user_id=user_id))
         return ok
 
-    def delete_item(self, task_id: int) -> bool:
-        """Удаляет задачу по ID из SQLite И из системного Календаря macOS / .ics."""
-        item_to_remove = self.get_item_by_id(task_id)
+    def delete_item(self, task_id: int, user_id: int = 1) -> bool:
+        item_to_remove = self.get_item_by_id(task_id, user_id=user_id)
         if not item_to_remove:
             return False
 
         with self._get_conn() as conn:
-            cur = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+            cur = conn.execute(
+                "DELETE FROM tasks WHERE id = ? AND user_id = ?",
+                (task_id, user_id)
+            )
             conn.commit()
             deleted = cur.rowcount > 0
 
         if deleted and self._is_real_db():
             CalendarIntegration.remove_event_from_os_calendar(item_to_remove)
-            CalendarIntegration.export_all_to_ics(self.get_history(limit=200))
+            CalendarIntegration.export_all_to_ics(self.get_history(limit=200, user_id=user_id))
 
         return deleted
 
-    def find_and_delete_by_query(self, query_text: str) -> Optional[Dict[str, Any]]:
-        """Находит задачу по голосовому описанию и удаляет её из БД и Календаря."""
-        candidates = self.search_past_items(query_text, top_k=1)
-        if not candidates:
+    def find_and_delete_by_query(
+        self,
+        query_text: str,
+        target_id: Optional[int] = None,
+        user_id: int = 1
+    ) -> Optional[Dict[str, Any]]:
+        target = self.find_best_matching_item(
+            query_text=query_text,
+            target_id=target_id,
+            only_active=False,
+            user_id=user_id
+        )
+        if not target:
             return None
-        target = candidates[0]
-        if self.delete_item(target["id"]):
+        if self.delete_item(target["id"], user_id=user_id):
             return target
         return None
 
-    def find_and_complete_by_query(self, query_text: str) -> Optional[Dict[str, Any]]:
-        """Находит активную задачу по голосовому описанию и переводит в статус Done."""
-        candidates = self.search_past_items(query_text, top_k=1, only_active=True)
-        if not candidates:
-            candidates = self.search_past_items(query_text, top_k=1, only_active=False)
-        if not candidates:
+    def find_and_complete_by_query(
+        self,
+        query_text: str,
+        target_id: Optional[int] = None,
+        user_id: int = 1
+    ) -> Optional[Dict[str, Any]]:
+        target = self.find_best_matching_item(
+            query_text=query_text,
+            target_id=target_id,
+            only_active=True,
+            user_id=user_id
+        )
+        if not target:
             return None
-        target = candidates[0]
-        if self.mark_done(target["id"]):
+        if self.mark_done(target["id"], user_id=user_id):
             target["status"] = "Done"
             return target
         return None
 
     def check_and_trigger_upcoming_notifications(self, now: Optional[datetime] = None) -> List[Dict[str, Any]]:
-        """
-        Проверяет активные задачи/напоминания/встречи, до которых осталось <= 60 минут,
-        отправляет системное уведомление и помечает notified = 1.
-        """
         now_dt = now or datetime.now()
         today_str = now_dt.strftime("%Y-%m-%d")
         tomorrow_str = (now_dt + timedelta(days=1)).strftime("%Y-%m-%d")
 
         with self._get_conn() as conn:
             rows = conn.execute("""
-                SELECT id, intent, raw_text, action, parsed_date, parsed_time, status
+                SELECT id, user_id, intent, raw_text, action, parsed_date, parsed_time, status
                 FROM tasks
                 WHERE status = 'Active'
                   AND COALESCE(notified, 0) = 0
@@ -669,7 +1199,6 @@ class DatabaseManager:
                 continue
 
             diff_seconds = (event_dt - now_dt).total_seconds()
-            # Уведомляем, если до задачи осталось от 0 до 60 минут (3600 сек)
             if 0 <= diff_seconds <= 3600:
                 with self._get_conn() as conn:
                     conn.execute("UPDATE tasks SET notified = 1 WHERE id = ?", (item["id"],))

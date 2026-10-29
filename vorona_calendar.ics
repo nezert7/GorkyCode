@@ -4,16 +4,16 @@ PRODID:-//Vorona Voice Assistant//RU
 CALSCALE:GREGORIAN
 METHOD:PUBLISH
 BEGIN:VEVENT
-UID:vorona-task-11@vorona.local
-DTSTART:20261029T132500
-DTEND:20261029T142500
-SUMMARY:[Напоминание] Сходить в зал
-DESCRIPTION:Создано голосовым ассистентом Ворона (Поставь напоминания, на сегодня сходить в зал 13 часов 25 минут.) [VORONA_ID:11]
+UID:vorona-task-1@vorona.local
+DTSTART:20261030T070000
+DTEND:20261030T080000
+SUMMARY:[Задача] Сходить в кино
+DESCRIPTION:Создано голосовым ассистентом Ворона (Поставим сходить завтра в 7 часов утро в кино.) [VORONA_ID:1]
 STATUS:CONFIRMED
 BEGIN:VALARM
 TRIGGER:-PT60M
 ACTION:DISPLAY
-DESCRIPTION:Напоминание: Сходить в зал
+DESCRIPTION:Напоминание: Сходить в кино
 END:VALARM
 END:VEVENT
 END:VCALENDAR
