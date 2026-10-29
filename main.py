@@ -20,6 +20,15 @@ from database import CalendarIntegration, get_intent_label_ru
 from prompts_and_memory import MemoryManager
 from voice_service import VoiceService
 from agent_core import run_agent_turn, get_shared_agent, format_spoken_response
+from auth import (
+    hash_password,
+    verify_password,
+    validate_password_strength,
+    create_access_token,
+    decode_access_token,
+    security_scheme
+)
+
 
 app = FastAPI(title="Ворона — Voice Assistant Desktop API")
 
@@ -445,3 +454,32 @@ if os.path.exists(FRONTEND_DIR):
         if os.path.isfile(index_file):
             return FileResponse(index_file, headers=NO_CACHE_HEADERS)
         return {"message": "Frontend not built yet"}
+
+@app.post("/api/auth/register", response_model=AuthResponse)
+async def register_endpoint(req: AuthRequest):
+    username = req.username.strip()
+    password = req.password
+
+    if len(username) < 2:
+        raise HTTPException(status_code=400, detail="Логин должен содержать минимум 2 символа")
+
+    pwd_error = validate_password_strength(password, username=username)
+    if pwd_error:
+        raise HTTPException(status_code=400, detail=pwd_error)
+
+    agent = get_shared_agent()
+    existing = agent.db.get_user_by_username(username)
+    if existing:
+        raise HTTPException(status_code=409, detail="Пользователь с таким логином уже существует")
+
+    pwd_hash = hash_password(password)
+    created_user = agent.db.create_user(username, pwd_hash)
+    if not created_user:
+        raise HTTPException(status_code=500, detail="Не удалось создать пользователя")
+
+    token = create_access_token(created_user["id"], created_user["username"])
+    return AuthResponse(
+        token=token,
+        user={"id": created_user["id"], "username": created_user["username"]}
+    )
+

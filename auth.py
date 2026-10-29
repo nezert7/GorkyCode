@@ -1,11 +1,12 @@
 import os
+import re
 import hmac
 import json
 import time
 import base64
 import hashlib
 import secrets
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from fastapi import Depends, HTTPException, Query, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
@@ -25,6 +26,33 @@ def _b64url_encode(data: bytes) -> str:
 def _b64url_decode(text: str) -> bytes:
     padding = "=" * ((4 - len(text) % 4) % 4)
     return base64.urlsafe_b64decode((text + padding).encode("ascii"))
+
+
+def validate_password_strength(password: str, username: str = "") -> Optional[str]:
+    """
+    Проверяет сложность пароля при регистрации.
+    Возвращает подробную строку с тем, что нужно исправить, или None, если пароль надёжный.
+    """
+    issues: List[str] = []
+
+    if len(password) < 8:
+        issues.append(f"минимум 8 символов (сейчас {len(password)})")
+    if " " in password:
+        issues.append("уберите пробелы")
+    if not re.search(r"[A-ZА-ЯЁ]", password):
+        issues.append("добавьте заглавную букву")
+    if not re.search(r"[a-zа-яё]", password):
+        issues.append("добавьте строчную букву")
+    if not re.search(r"\d", password):
+        issues.append("добавьте цифру")
+    if not re.search(r"[!@#$%^&*()_+\-=\[\]{};:'\",.<>/?\\|`~]", password):
+        issues.append("добавьте спецсимвол (!@#$% и т.д.)")
+    if username and password.lower() == username.strip().lower():
+        issues.append("пароль не должен совпадать с логином")
+
+    if issues:
+        return "Исправьте пароль: " + ", ".join(issues)
+    return None
 
 
 def hash_password(password: str, salt: Optional[str] = None) -> str:

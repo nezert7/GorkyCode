@@ -14,7 +14,18 @@ OLD_AUTH_AND_FETCH = (
     'async function Jn(e,t){let n=await fetch(qn(e),t);if(!n.ok)throw Error(`Сервер ответил ошибкой ${n.status}`);let r=await n.text(),i=r?JSON.parse(r):void 0;return Yn(i),i}'
 )
 
-NEW_AUTH_AND_FETCH = """function Wn(){
+NEW_AUTH_AND_FETCH = """function checkVoronaPassword(pwd,login){
+  const issues=[];
+  if(pwd.length<8)issues.push(`минимум 8 символов (сейчас ${pwd.length})`);
+  if(pwd.includes(` `))issues.push(`уберите пробелы`);
+  if(!/[A-ZА-ЯЁ]/.test(pwd))issues.push(`нужна заглавная буква`);
+  if(!/[a-zа-яё]/.test(pwd))issues.push(`нужна строчная буква`);
+  if(!/\\d/.test(pwd))issues.push(`нужна цифра`);
+  if(!/[!@#$%^&*()_+\\-=\\[\\]{};:'",.<>/?\\\\|`~]/.test(pwd))issues.push(`нужен спецсимвол (!@#$% и т.д.)`);
+  if(login && pwd.toLowerCase()===login.trim().toLowerCase())issues.push(`не должен совпадать с логином`);
+  return issues.length?`Исправьте пароль: `+issues.join(`, `):null;
+}
+function Wn(){
   let[e,t]=(0,_.useState)(!0),[n,r]=(0,_.useState)(``),[i,a]=(0,_.useState)(``),[o,s]=(0,_.useState)({}),[busy,setBusy]=(0,_.useState)(!1),c=vt();
   (0,_.useEffect)(()=>{
     const tok=localStorage.getItem(`vorona_token`);
@@ -28,10 +39,13 @@ NEW_AUTH_AND_FETCH = """function Wn(){
     if(busy)return;
     s({});
     let hasErr=!1,errObj={};
-    if(!n.trim()){errObj.login=`Неверный формат (пустая строка)`;hasErr=!0;}
-    else if(n.trim().length<2){errObj.login=`Минимум 2 символа`;hasErr=!0;}
-    if(!i.trim()){errObj.password=`Неверный формат`;hasErr=!0;}
-    else if(i.trim().length<4){errObj.password=`Минимум 4 символа`;hasErr=!0;}
+    if(!n.trim()){errObj.login=`Введите логин`;hasErr=!0;}
+    else if(n.trim().length<2){errObj.login=`Логин: минимум 2 символа`;hasErr=!0;}
+    if(!i){errObj.password=`Введите пароль`;hasErr=!0;}
+    else if(!e){
+      const pwdMsg=checkVoronaPassword(i,n);
+      if(pwdMsg){errObj.password=pwdMsg;hasErr=!0;}
+    }
     if(hasErr){
       s(errObj);
       if(errObj.login)r(``);
@@ -44,20 +58,17 @@ NEW_AUTH_AND_FETCH = """function Wn(){
       const res=await fetch(url,{
         method:`POST`,
         headers:{"Content-Type":`application/json`},
-        body:JSON.stringify({username:n.trim(),password:i.trim()})
+        body:JSON.stringify({username:n.trim(),password:i})
       });
       const data=await res.json().catch(()=>({}));
       if(!res.ok){
         const detail=data.detail||`Ошибка авторизации`;
-        if(res.status===409){
+        if(res.status===409 || detail.toLowerCase().includes(`логин`)){
           s({login:detail});
           r(``);
-        }else if(res.status===401){
+        }else{
           s({password:detail});
           a(``);
-        }else{
-          s({login:detail});
-          r(``);
         }
         return;
       }
@@ -72,7 +83,8 @@ NEW_AUTH_AND_FETCH = """function Wn(){
     }
   }
   function u(){t(!e),s({}),r(``),a(``)}
-  return(0,M.jsx)(`div`,{className:`screen`,children:(0,M.jsxs)(`div`,{className:`stage`,children:[(0,M.jsx)(Hn,{variant:`start`}),(0,M.jsxs)(`div`,{className:`auth-box`,children:[(0,M.jsx)(`h2`,{className:`auth-title`,children:e?`Авторизация`:`Регистрация`}),(0,M.jsxs)(`form`,{onSubmit:l,className:`auth-form`,children:[(0,M.jsxs)(`div`,{className:`auth-row`,children:[(0,M.jsx)(`label`,{children:`Логин:`}),(0,M.jsx)(`input`,{type:`text`,value:n,onChange:e=>r(e.target.value),placeholder:o.login||``,className:o.login?`input-error`:``})]}),(0,M.jsxs)(`div`,{className:`auth-row`,children:[(0,M.jsx)(`label`,{children:`Пароль:`}),(0,M.jsx)(`input`,{type:`password`,value:i,onChange:e=>a(e.target.value),placeholder:o.password||``,className:o.password?`input-error`:``})]}),(0,M.jsx)(`button`,{type:`submit`,disabled:busy,className:`auth-submit`,children:e?`Войти`:`Зарегистрироваться`})]}),(0,M.jsx)(`button`,{type:`button`,className:`auth-switch`,onClick:u,children:e?`Нет аккаунта...`:`Уже есть аккаунт...`})]}),(0,M.jsx)(`p`,{className:`start-caption`,children:`Я всё помню...`}),(0,M.jsx)(`img`,{src:Un,alt:``,className:`crow crow--start`})]})});
+  const errBanner=o.password||o.login||``;
+  return(0,M.jsx)(`div`,{className:`screen`,children:(0,M.jsxs)(`div`,{className:`stage`,children:[(0,M.jsx)(Hn,{variant:`start`}),(0,M.jsxs)(`div`,{className:`auth-box`,children:[(0,M.jsx)(`h2`,{className:`auth-title`,children:e?`Авторизация`:`Регистрация`}),(0,M.jsxs)(`form`,{onSubmit:l,className:`auth-form`,children:[(0,M.jsxs)(`div`,{className:`auth-row`,children:[(0,M.jsx)(`label`,{children:`Логин:`}),(0,M.jsx)(`input`,{type:`text`,value:n,onChange:ev=>{r(ev.target.value);if(o.login)s({...o,login:``});},placeholder:o.login||``,className:o.login?`input-error`:``})]}),(0,M.jsxs)(`div`,{className:`auth-row`,children:[(0,M.jsx)(`label`,{children:`Пароль:`}),(0,M.jsx)(`input`,{type:`password`,value:i,onChange:ev=>{a(ev.target.value);if(o.password)s({...o,password:``});},placeholder:o.password?`Не соответствует требованиям`:``,className:o.password?`input-error`:``})]}),errBanner&&(0,M.jsx)(`div`,{style:{color:`#b00020`,fontSize:`calc(var(--u) * 11)`,lineHeight:`1.25`,textAlign:`center`,padding:`calc(var(--u) * 4) calc(var(--u) * 6)`,border:`1.5px solid #b00020`,background:`rgba(176,0,32,0.06)`},children:errBanner}),(0,M.jsx)(`button`,{type:`submit`,disabled:busy,className:`auth-submit`,children:e?`Войти`:`Зарегистрироваться`})]}),(0,M.jsx)(`button`,{type:`button`,className:`auth-switch`,onClick:u,children:e?`Нет аккаунта...`:`Уже есть аккаунт...`})]}),(0,M.jsx)(`p`,{className:`start-caption`,children:`Я всё помню...`}),(0,M.jsx)(`img`,{src:Un,alt:``,className:`crow crow--start`})]})});
 }
 function Gn(){
   const c=vt();
@@ -126,7 +138,7 @@ def main():
         shutil.copyfile(JS_PATH, BAK_PATH)
 
     if OLD_AUTH_AND_FETCH not in content:
-        print("ℹ️ Заглушка уже убрана или файл изменён.")
+        print("ℹ️ Не удалось найти исходный блок в JS-файле. Проверьте наличие резервной копии .bak.")
         return
 
     content = content.replace(OLD_AUTH_AND_FETCH, NEW_AUTH_AND_FETCH)
@@ -135,7 +147,7 @@ def main():
     with open(JS_PATH, "w", encoding="utf-8") as f:
         f.write(content)
 
-    print("✅ Заглушка убрана! Родное окно авторизации подключено к бэкенду.")
+    print("✅ Проверка сложности пароля и подсказки при регистрации успешно добавлены!")
 
 
 if __name__ == "__main__":
