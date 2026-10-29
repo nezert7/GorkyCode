@@ -1,3 +1,21 @@
+.screen {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg, #f4f7fb);
+  overflow: hidden;
+}
+
+.stage {
+  --u: calc(min(100vw / 1280, 100vh / 800));
+  width: calc(var(--u) * 1280);
+  height: calc(var(--u) * 800);
+  position: relative;
+  background: var(--bg, #f4f7fb); 
+}
+
 .crow {
   position: absolute;
   height: auto;

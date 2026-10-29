@@ -10,7 +10,8 @@ export default function AuthPage() {
   const [isLogin, setIsLogin] = useState(true)
   const [login, setLogin] = useState('')
   const [password, setPassword] = useState('')
-  const [errors, setErrors] = useState<{ login?: string; password?: string }>({})
+  // ДОБАВЛЕНО: добавили global в типизацию, чтобы TS не ругался
+  const [errors, setErrors] = useState<{ login?: string; password?: string; global?: string }>({})
   
   const navigate = useNavigate()
 
@@ -18,7 +19,8 @@ export default function AuthPage() {
     e.preventDefault()
     setErrors({})
     let hasError = false
-    const newErrors: { login?: string; password?: string } = {}
+    // ДОБАВЛЕНО: добавили global в типизацию объекта
+    const newErrors: { login?: string; password?: string; global?: string } = {}
 
     // Имитация проверок для показа визуальных ошибок
     if (!login.trim()) {
@@ -27,6 +29,12 @@ export default function AuthPage() {
     }
     if (!password.trim()) {
       newErrors.password = 'Неверный формат'
+      hasError = true
+    }
+
+    // Для проверки работы глобальной ошибки:
+    if (login.trim() === 'admin' && password.trim() === 'wrong') {
+      newErrors.global = 'Ошибка авторизации'
       hasError = true
     }
 
@@ -78,6 +86,13 @@ export default function AuthPage() {
                 className={errors.password ? 'input-error' : ''}
               />
             </div>
+
+            {/* Глобальная ошибка (возвращаем её на место) */}
+            {errors.global && (
+              <div className="auth-error-global">
+                {errors.global}
+              </div>
+            )}
             
             <button type="submit" className="auth-submit">
               {isLogin ? 'Войти' : 'Зарегистрироваться'}
