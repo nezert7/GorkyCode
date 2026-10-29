@@ -165,7 +165,7 @@ export default function MenuPage() {
                   ответить
                 </button>
                 <button className="result-action result-action--continue-middle" disabled={busy} onClick={handleForceContinue}>
-                  продолжить
+                  сохранить
                 </button>
                 <button className="result-action result-action--cancel-right" disabled={busy} onClick={handleCancel}>
                   отменить
@@ -174,7 +174,7 @@ export default function MenuPage() {
             ) : (
               <>
                 <button className="result-action result-action--continue" disabled={busy} onClick={handleContinue}>
-                  продолжить
+                  сохранить
                 </button>
                 <button className="result-action result-action--cancel" disabled={busy} onClick={handleCancel}>
                   отменить
