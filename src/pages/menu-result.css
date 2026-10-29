@@ -42,19 +42,20 @@
 }
 
 
-/* Добавь это в конец файла menu-result.css */
-
 .result-action--reply {
-  left: calc(var(--u) * 60);
+  left: calc(var(--u) * 72);
   top: calc(var(--u) * 699);
+  font-size: calc(var(--u) * 24);
 }
 
 .result-action--continue-middle {
-  left: calc(var(--u) * 310);
+  left: calc(var(--u) * 318);
   top: calc(var(--u) * 699);
+  font-size: calc(var(--u) * 24);
 }
 
 .result-action--cancel-right {
-  left: calc(var(--u) * 600);
+  left: calc(var(--u) * 588);
   top: calc(var(--u) * 699);
+  font-size: calc(var(--u) * 24);
 }

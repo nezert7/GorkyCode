@@ -112,7 +112,7 @@ async function fetchPlans(path: string): Promise<Plan[]> {
 
 // Все записи (экран "история запросов"). Сервер отдаёт максимум 200 за раз.
 export async function getPlans(): Promise<Plan[]> {
-  return fetchPlans('/api/history?limit=200&sort_by=date')
+  return fetchPlans('/api/history?limit=200&sort_by=created_desc')
 }
 
 // Задачи и встречи за период. Сервер требует начало периода,

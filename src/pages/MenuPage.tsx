@@ -15,12 +15,6 @@ import './menu-result.css'
 import './menu-saved.css'
 import './menu-error.css'
 
-// Состояния одного экрана:
-// idle      - ждём нажатия на наушники
-// listening - идёт запись (синие наушники)
-// result    - показан ответ сервера, кнопки "продолжить" и "отменить"
-// saved     - после "продолжить": "Запомнила..."
-// error     - что-то пошло не так (в макетах этого экрана нет, пока оформлен как "saved")
 type Mode = 'idle' | 'listening' | 'result' | 'saved' | 'error'
 
 function describeError(error: unknown): string {
@@ -31,12 +25,20 @@ function describeError(error: unknown): string {
   return 'Что-то пошло не так'
 }
 
+function getFontSize(text: string): string {
+  const len = text.length
+  if (len > 140) return 'calc(var(--u) * 16)'
+  if (len > 80) return 'calc(var(--u) * 20)'
+  if (len > 40) return 'calc(var(--u) * 24)'
+  return 'calc(var(--u) * 32)'
+}
+
 export default function MenuPage() {
   const [mode, setMode] = useState<Mode>('idle')
   const [generatedText, setGeneratedText] = useState('')
-  const [operation, setOperation] = useState('') // <--- ДОБАВИТЬ ЭТО
+  const [operation, setOperation] = useState('')
   const [errorText, setErrorText] = useState('')
-  const [busy, setBusy] = useState(false) // true, пока ждём микрофон или сервер
+  const [busy, setBusy] = useState(false)
   const { start, stop, cancel } = useVoiceRecorder()
 
   function fail(error: unknown) {
@@ -54,9 +56,9 @@ export default function MenuPage() {
         setMode('listening')
       } else {
         const audio = await stop()
-        const res = await recognizeSpeech(audio) // <--- МЕНЯЕМ ЭТИ 3 СТРОКИ
-        setGeneratedText(res.text)               // <---
-        setOperation(res.operation)              // <---
+        const res = await recognizeSpeech(audio)
+        setGeneratedText(res.text)
+        setOperation(res.operation)
         setMode('result')
       }
     } catch (error) {
@@ -66,10 +68,17 @@ export default function MenuPage() {
     }
   }
 
+  // Кнопка "сохранить": если запрос был неполным (clarify), сначала просим LLM
+  // проставить дефолты, а затем подтверждаем сохранение в БД
   async function handleContinue() {
     if (busy) return
     setBusy(true)
     try {
+      if (operation === 'clarify') {
+        const res = await sendText('Оставь как есть, поставь время по умолчанию')
+        setGeneratedText(res.text)
+        setOperation(res.operation)
+      }
       await savePlan()
       setMode('saved')
     } catch (error) {
@@ -78,13 +87,14 @@ export default function MenuPage() {
       setBusy(false)
     }
   }
-  // Функция для ответа на уточняющий вопрос нейросети
+
+  // Кнопка "продолжить": снова включает микрофон без сброса контекста на сервере
   async function handleReply() {
     if (busy) return
     setBusy(true)
     try {
-      await start() // Снова включаем микрофон
-      setMode('listening') // Переводим интерфейс в режим записи
+      await start()
+      setMode('listening')
     } catch (error) {
       fail(error)
     } finally {
@@ -92,21 +102,7 @@ export default function MenuPage() {
     }
   }
 
-  async function handleForceContinue() {
-    if (busy) return
-    setBusy(true)
-    try {
-      // Симулируем ответ пользователя, чтобы LLM сама проставила дефолты
-      const res = await sendText('Оставь как есть, поставь время по умолчанию')
-      setGeneratedText(res.text)
-      setOperation(res.operation)
-    } catch (error) {
-      fail(error)
-    } finally {
-      setBusy(false)
-    }
-  }
-
+  // Кнопка "отменить": сбрасывает несохраненный контекст на сервере
   async function handleCancel() {
     setMode('idle')
     try {
@@ -157,30 +153,31 @@ export default function MenuPage() {
 
         {mode === 'result' && (
           <>
-            <div className="result-box">{generatedText}</div>
+            <div className="result-box" style={{ fontSize: getFontSize(generatedText) }}>
+              {generatedText}
+            </div>
 
-            {operation === 'clarify' ? (
-              <>
-                <button className="result-action result-action--reply" disabled={busy} onClick={handleReply}>
-                  ответить
-                </button>
-                <button className="result-action result-action--continue-middle" disabled={busy} onClick={handleForceContinue}>
-                  сохранить
-                </button>
-                <button className="result-action result-action--cancel-right" disabled={busy} onClick={handleCancel}>
-                  отменить
-                </button>
-              </>
-            ) : (
-              <>
-                <button className="result-action result-action--continue" disabled={busy} onClick={handleContinue}>
-                  сохранить
-                </button>
-                <button className="result-action result-action--cancel" disabled={busy} onClick={handleCancel}>
-                  отменить
-                </button>
-              </>
-            )}
+            <button
+              className="result-action result-action--reply"
+              disabled={busy}
+              onClick={handleContinue}
+            >
+              сохранить
+            </button>
+            <button
+              className="result-action result-action--continue-middle"
+              disabled={busy}
+              onClick={handleReply}
+            >
+              продолжить
+            </button>
+            <button
+              className="result-action result-action--cancel-right"
+              disabled={busy}
+              onClick={handleCancel}
+            >
+              отменить
+            </button>
           </>
         )}
 
