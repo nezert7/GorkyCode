@@ -1,19 +1,32 @@
-BEGIN:VCALENDAR
-VERSION:2.0
-PRODID:-//Vorona Voice Assistant//RU
-CALSCALE:GREGORIAN
-METHOD:PUBLISH
-BEGIN:VEVENT
-UID:vorona-task-1@vorona.local
-DTSTART:20261030T070000
-DTEND:20261030T080000
-SUMMARY:[Задача] Сходить в кино
-DESCRIPTION:Создано голосовым ассистентом Ворона (Поставим сходить завтра в 7 часов утро в кино.) [VORONA_ID:1]
-STATUS:CONFIRMED
-BEGIN:VALARM
-TRIGGER:-PT60M
-ACTION:DISPLAY
-DESCRIPTION:Напоминание: Сходить в кино
-END:VALARM
-END:VEVENT
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Vorona Voice Assistant//RU
+CALSCALE:GREGORIAN
+METHOD:PUBLISH
+BEGIN:VEVENT
+UID:vorona-task-3@vorona.local
+DTSTART:20261031T110000
+DTEND:20261031T120000
+SUMMARY:[Задача] Тридцатрика ровая и дуд по слезавтрагу дядь
+DESCRIPTION:Создано голосовым ассистентом Ворона (Тридцатрика ровая и дуд по слезавтрагу дядь.) [VORONA_ID:3]
+STATUS:CONFIRMED
+BEGIN:VALARM
+TRIGGER:-PT60M
+ACTION:DISPLAY
+DESCRIPTION:Напоминание: Тридцатрика ровая и дуд по слезавтрагу дядь
+END:VALARM
+END:VEVENT
+BEGIN:VEVENT
+UID:vorona-task-2@vorona.local
+DTSTART:20261031T220000
+DTEND:20261031T230000
+SUMMARY:[Встреча] Встреча с Машей
+DESCRIPTION:Создано голосовым ассистентом Ворона (Завтра встреча с Машей в десять вечера.) [VORONA_ID:2]
+STATUS:CONFIRMED
+BEGIN:VALARM
+TRIGGER:-PT60M
+ACTION:DISPLAY
+DESCRIPTION:Напоминание: Встреча с Машей
+END:VALARM
+END:VEVENT
 END:VCALENDAR

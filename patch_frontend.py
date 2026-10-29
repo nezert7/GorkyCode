@@ -1,7 +1,9 @@
 import os
+import re
 import shutil
 
 JS_PATH = os.path.join("static_frontend", "assets", "index-BbdRGwz5.js")
+CSS_PATH = os.path.join("static_frontend", "assets", "index-CQ7gGmxA.css")
 BAK_PATH = JS_PATH + ".bak"
 
 OLD_AUTH_AND_FETCH = (
@@ -111,6 +113,57 @@ OLD_NOTIF_POLL = "async function Dr(){return(await Jn(`/api/notifications`))?.no
 NEW_NOTIF_POLL = "async function Dr(){if(!localStorage.getItem(`vorona_token`))return[];return(await Jn(`/api/notifications`))?.notifications??[]}"
 
 
+def patch_three_buttons(content: str) -> str:
+    """
+    Заменяет кнопки в режиме result на 3 постоянные кнопки:
+    - сохранить (вызывает подтверждение и сохранение в БД)
+    - продолжить (включает микрофон для дозаписи)
+    - отменить (сбрасывает черновик)
+    """
+    # Вариант 1: Если в бандле тернарный оператор i===`clarify` (ответить / продолжить / отменить)
+    pattern_ternary = re.compile(
+        r'i===`clarify`\?\(0,([A-Za-z0-9_$]+)\.jsxs\)\(\1\.Fragment,\{children:\['
+        r'\(0,\1\.jsx\)\(`button`,\{className:`result-action result-action--reply`,disabled:c,onClick:g,children:`ответить`\}\),'
+        r'\(0,\1\.jsx\)\(`button`,\{className:`result-action result-action--continue-middle`,disabled:c,onClick:v,children:`продолжить`\}\),'
+        r'\(0,\1\.jsx\)\(`button`,\{className:`result-action result-action--cancel-right`,disabled:c,onClick:y,children:`отменить`\}\)'
+        r'\]\}\):\(0,\1\.jsxs\)\(\1\.Fragment,\{children:\['
+        r'\(0,\1\.jsx\)\(`button`,\{className:`result-action result-action--continue`,disabled:c,onClick:h,children:`продолжить`\}\),'
+        r'\(0,\1\.jsx\)\(`button`,\{className:`result-action result-action--cancel`,disabled:c,onClick:y,children:`отменить`\}\)'
+        r'\]\}\)'
+    )
+
+    def repl_ternary(m):
+        jsx = m.group(1)
+        return (
+            f'(0,{jsx}.jsxs)({jsx}.Fragment,{{children:['
+            f'(0,{jsx}.jsx)(`button`,{{className:`result-action result-action--reply`,disabled:c,onClick:h,children:`сохранить`}}),'
+            f'(0,{jsx}.jsx)(`button`,{{className:`result-action result-action--continue-middle`,disabled:c,onClick:g,children:`продолжить`}}),'
+            f'(0,{jsx}.jsx)(`button`,{{className:`result-action result-action--cancel-right`,disabled:c,onClick:y,children:`отменить`}})'
+            f']}})'
+        )
+
+    content, n1 = pattern_ternary.subn(repl_ternary, content)
+    if n1 > 0:
+        print("✅ Кнопки «сохранить / продолжить / отменить» успешно пропатчены!")
+    return content
+
+
+def ensure_three_buttons_css():
+    if not os.path.exists(CSS_PATH):
+        return
+    with open(CSS_PATH, "r", encoding="utf-8") as f:
+        css = f.read()
+    if "result-action--continue-middle" not in css:
+        extra_css = (
+            "\n.result-action--reply{left:calc(var(--u) * 60);top:calc(var(--u) * 699);}"
+            "\n.result-action--continue-middle{left:calc(var(--u) * 310);top:calc(var(--u) * 699);}"
+            "\n.result-action--cancel-right{left:calc(var(--u) * 600);top:calc(var(--u) * 699);}\n"
+        )
+        with open(CSS_PATH, "a", encoding="utf-8") as f:
+            f.write(extra_css)
+        print("✅ Стили для 3 кнопок добавлены в CSS.")
+
+
 def main():
     if not os.path.exists(JS_PATH):
         print(f"❌ Файл не найден: {JS_PATH}")
@@ -118,24 +171,24 @@ def main():
 
     if os.path.exists(BAK_PATH):
         shutil.copyfile(BAK_PATH, JS_PATH)
+    else:
+        shutil.copyfile(JS_PATH, BAK_PATH)
 
     with open(JS_PATH, "r", encoding="utf-8") as f:
         content = f.read()
 
-    if OLD_AUTH_AND_FETCH in content and not os.path.exists(BAK_PATH):
-        shutil.copyfile(JS_PATH, BAK_PATH)
+    if OLD_AUTH_AND_FETCH in content:
+        content = content.replace(OLD_AUTH_AND_FETCH, NEW_AUTH_AND_FETCH)
+        print("✅ Авторизация подключена к бэкенду.")
 
-    if OLD_AUTH_AND_FETCH not in content:
-        print("ℹ️ Заглушка уже убрана или файл изменён.")
-        return
-
-    content = content.replace(OLD_AUTH_AND_FETCH, NEW_AUTH_AND_FETCH)
     content = content.replace(OLD_NOTIF_POLL, NEW_NOTIF_POLL)
+    content = patch_three_buttons(content)
 
     with open(JS_PATH, "w", encoding="utf-8") as f:
         f.write(content)
 
-    print("✅ Заглушка убрана! Родное окно авторизации подключено к бэкенду.")
+    ensure_three_buttons_css()
+    print("🚀 Патч фронтенда успешно завершён!")
 
 
 if __name__ == "__main__":
