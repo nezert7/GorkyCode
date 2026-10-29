@@ -8,7 +8,7 @@ import urllib.request
 import urllib3
 import httpx
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from openai import OpenAI
 from dotenv import load_dotenv
 
@@ -26,11 +26,285 @@ logging.basicConfig(
 )
 
 
+class RussianDateTimeExtractor:
+    """Точное извлечение дат и времени из русской речи (включая числительные словами и дни недели)."""
+
+    WORD_HOURS = {
+        "час": 1, "один": 1, "одного": 1, "первого": 1,
+        "два": 2, "двух": 2, "второго": 2,
+        "три": 3, "трех": 3, "трёх": 3, "третьего": 3,
+        "четыре": 4, "четырех": 4, "четырёх": 4, "четвертого": 4, "четвёртого": 4,
+        "пять": 5, "пяти": 5, "пятого": 5,
+        "шесть": 6, "шести": 6, "шестого": 6,
+        "семь": 7, "семи": 7, "седьмого": 7,
+        "восемь": 8, "восьми": 8, "восьмого": 8,
+        "девять": 9, "девяти": 9, "девятого": 9,
+        "десять": 10, "десяти": 10, "десятого": 10,
+        "одиннадцать": 11, "одиннадцати": 11, "одиннадцатого": 11,
+        "двенадцать": 12, "двенадцати": 12, "двенадцатого": 12,
+        "тринадцать": 13, "четырнадцать": 14, "пятнадцать": 15,
+        "шестнадцать": 16, "семнадцать": 17, "восемнадцать": 18,
+        "девятнадцать": 19, "двадцать": 20, "двадцать один": 21,
+        "двадцать два": 22, "двадцать три": 23
+    }
+
+    WEEKDAYS_MAP = {
+        "понедельник": 0, "вторник": 1, "среду": 2, "среда": 2,
+        "четверг": 3, "пятницу": 4, "пятница": 4,
+        "субботу": 5, "суббота": 5, "воскресенье": 6
+    }
+
+    MONTHS_MAP = {
+        "январ": 1, "феврал": 2, "март": 3, "апрел": 4, "ма": 5, "июн": 6,
+        "июл": 7, "август": 8, "сентябр": 9, "октябр": 10, "ноябр": 11, "декабр": 12
+    }
+
+    @classmethod
+    def extract_date_and_time(cls, text: str, now: datetime) -> Tuple[Optional[str], Optional[str], str]:
+        clean = text
+        lower = clean.lower()
+        parsed_time: Optional[str] = None
+        parsed_date: Optional[str] = None
+
+        tm = re.search(r"(?:(?:\bв|\bна|\bк)\s+)?\b([0-2]?\d)[:.]([0-5]\d)\b", lower)
+        if tm:
+            h, m = int(tm.group(1)), int(tm.group(2))
+            if 0 <= h <= 23:
+                if ("вечер" in lower or "дня" in lower) and 1 <= h <= 11:
+                    h += 12
+                parsed_time = f"{h:02d}:{m:02d}"
+                clean = clean[:tm.start()] + " " + clean[tm.end():]
+                clean = re.sub(r"\b(?:утра|вечера|дня|ночи)\b", " ", clean, flags=re.IGNORECASE)
+                lower = clean.lower()
+
+        if not parsed_time:
+            if "полдень" in lower:
+                parsed_time = "12:00"
+                clean = re.sub(r"\b(?:в|на)?\s*полдень\b", " ", clean, flags=re.IGNORECASE)
+            elif "полночь" in lower:
+                parsed_time = "00:00"
+                clean = re.sub(r"\b(?:в|на)?\s*полночь\b", " ", clean, flags=re.IGNORECASE)
+            else:
+                half_m = re.search(r"\b(?:в\s+)?половине\s+([а-яё]+)(?:\s+(?:утра|дня|вечера))?", lower)
+                if half_m and half_m.group(1) in cls.WORD_HOURS:
+                    target_h = cls.WORD_HOURS[half_m.group(1)] - 1
+                    if "вечер" in lower or "дня" in lower or (1 <= target_h <= 6):
+                        if target_h < 12:
+                            target_h += 12
+                    parsed_time = f"{target_h:02d}:30"
+                    clean = clean[:half_m.start()] + " " + clean[half_m.end():]
+
+        if not parsed_time:
+            hm = re.search(
+                r"\b(?:в|на|к)\s+([0-2]?\d)\s*(?:час(?:а|ов)?|утра|вечера|дня|ночи)\b",
+                clean.lower()
+            )
+            if hm:
+                h = int(hm.group(1))
+                segment = hm.group(0).lower()
+                if ("вечер" in segment or "дня" in segment) and 1 <= h <= 11:
+                    h += 12
+                if 0 <= h <= 23:
+                    parsed_time = f"{h:02d}:00"
+                    clean = clean[:hm.start()] + " " + clean[hm.end():]
+
+        if not parsed_time:
+            for word, h_val in sorted(cls.WORD_HOURS.items(), key=lambda x: -len(x[0])):
+                pat = rf"\b(?:в|на|к)\s+{word}(?:\s+час(?:а|ов)?)?(?:\s+(утра|дня|вечера|ночи))?\b"
+                wm = re.search(pat, clean.lower())
+                if wm:
+                    h = h_val
+                    period = wm.group(1) or ""
+                    if (period in ("вечера", "дня") or ("вечер" in clean.lower() or "дня" in clean.lower())) and 1 <= h <= 11:
+                        h += 12
+                    if 0 <= h <= 23:
+                        parsed_time = f"{h:02d}:00"
+                        clean = clean[:wm.start()] + " " + clean[wm.end():]
+                        break
+
+        lower = clean.lower()
+
+        if re.search(r"\b(?:на\s+)?послезавтра\b", lower):
+            parsed_date = (now + timedelta(days=2)).strftime("%Y-%m-%d")
+            clean = re.sub(r"\b(?:на\s+)?послезавтра\b", " ", clean, flags=re.IGNORECASE)
+        elif re.search(r"\b(?:на\s+)?завтра\b", lower):
+            parsed_date = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+            clean = re.sub(r"\b(?:на\s+)?завтра\b", " ", clean, flags=re.IGNORECASE)
+        elif re.search(r"\b(?:на\s+)?сегодня\b", lower):
+            parsed_date = now.strftime("%Y-%m-%d")
+            clean = re.sub(r"\b(?:на\s+)?сегодня\b", " ", clean, flags=re.IGNORECASE)
+        elif re.search(r"\b(?:на\s+)?вчера\b", lower):
+            parsed_date = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+            clean = re.sub(r"\b(?:на\s+)?вчера\b", " ", clean, flags=re.IGNORECASE)
+        elif re.search(r"\bчерез\s+неделю\b", lower):
+            parsed_date = (now + timedelta(days=7)).strftime("%Y-%m-%d")
+            clean = re.sub(r"\bчерез\s+неделю\b", " ", clean, flags=re.IGNORECASE)
+
+        if not parsed_date:
+            for day_word, target_wd in cls.WEEKDAYS_MAP.items():
+                wd_m = re.search(rf"\b(?:в|во|на)\s+(?:следующ[уюийе]+\s+)?{day_word}\b", clean.lower())
+                if wd_m:
+                    days_ahead = (target_wd - now.weekday()) % 7
+                    if days_ahead == 0:
+                        days_ahead = 7
+                    parsed_date = (now + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
+                    clean = clean[:wd_m.start()] + " " + clean[wd_m.end():]
+                    break
+
+        if not parsed_date:
+            dm_match = re.search(r"(?:\bна\s+)?\b(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?\b", clean.lower())
+            if dm_match:
+                d, m = int(dm_match.group(1)), int(dm_match.group(2))
+                y = int(dm_match.group(3)) if dm_match.group(3) else now.year
+                try:
+                    parsed_date = datetime(y, m, d).strftime("%Y-%m-%d")
+                    clean = clean[:dm_match.start()] + " " + clean[dm_match.end():]
+                except ValueError:
+                    pass
+            else:
+                month_m = re.search(
+                    r"(?:\bна\s+)?\b(\d{1,2})\s+(январ[яе]|феврал[яе]|март[ае]?|апрел[яе]|ма[яе]|июн[яе]|июл[яе]|август[ае]?|сентябр[яе]|октябр[яе]|ноябр[яе]|декабр[яе])\b",
+                    clean.lower()
+                )
+                if month_m:
+                    d = int(month_m.group(1))
+                    m_prefix = month_m.group(2)[:5]
+                    m_num = next((v for k, v in cls.MONTHS_MAP.items() if m_prefix.startswith(k)), now.month)
+                    try:
+                        parsed_date = datetime(now.year, m_num, d).strftime("%Y-%m-%d")
+                        clean = clean[:month_m.start()] + " " + clean[month_m.end():]
+                    except ValueError:
+                        pass
+
+        clean = re.sub(r"\s+", " ", clean).strip(" ,.-?!")
+        return parsed_date, parsed_time, clean
+
+
+class VoiceUpdateExtractor:
+    """Специализированный анализатор команд переноса и изменения задач голосом."""
+
+    RESCHEDULE_PATTERN = re.compile(
+        r"^(?:ну\s+|эээ\s+|короче\s+|пожалуйста\s+|ворон[а]?\s+)*"
+        r"(?:перенеси|перенести|передвинь|передвинуть|сдвинь|сдвинуть|отложи|отложить|переназначь|переназначить|"
+        r"(?:поменяй|измени|обнови|исправь|переставь)\s+(?:время|дату|число|срок))\b\s*(.*)",
+        re.IGNORECASE
+    )
+
+    EDIT_PATTERN = re.compile(
+        r"^(?:ну\s+|эээ\s+|короче\s+|пожалуйста\s+|ворон[а]?\s+)*"
+        r"(?:измени|изменить|поменяй|поменять|переименуй|переименовать|исправь|исправить|"
+        r"замени|заменить|обнови|обновить|отредактируй|редактировать)\b\s*(.*)",
+        re.IGNORECASE
+    )
+
+    TYPE_WORDS_STRIP = re.compile(
+        r"^(?:мне\s+)?(?:мо[юйе]\s+)?(?:эт[уо]\s+)?"
+        r"(?:задачу|задачи|задача|встречу|встречи|встреча|напоминание|напоминания|напоминалку|дело|событие|запись|план)"
+        r"(?:\s+(?:про|по|о|об|на\s+тему))?\b\s*",
+        re.IGNORECASE
+    )
+
+    @classmethod
+    def is_update_command(cls, text: str) -> bool:
+        clean = text.strip()
+        return bool(cls.RESCHEDULE_PATTERN.match(clean) or cls.EDIT_PATTERN.match(clean))
+
+    @classmethod
+    def detect_intent_hint(cls, text: str) -> Optional[str]:
+        lower = text.lower()
+        if any(w in lower for w in ("встреч", "созвон", "обед", "планерк", "планёрк")):
+            return "Meeting"
+        if any(w in lower for w in ("напоминан", "напоминалк")):
+            return "Reminder"
+        if "задач" in lower:
+            return "Task"
+        return None
+
+    @classmethod
+    def extract(cls, raw_text: str, now: datetime, llm_parsed: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        clean = raw_text.strip()
+        intent_hint = cls.detect_intent_hint(clean)
+
+        resched_m = cls.RESCHEDULE_PATTERN.match(clean)
+        edit_m = cls.EDIT_PATTERN.match(clean)
+
+        dt_date, dt_time, _ = RussianDateTimeExtractor.extract_date_and_time(clean, now)
+
+        llm_date = (llm_parsed or {}).get("date")
+        llm_time = (llm_parsed or {}).get("time")
+        final_date = llm_date or dt_date
+        final_time = llm_time or dt_time
+        target_id = (llm_parsed or {}).get("target_id")
+
+        if resched_m:
+            _, _, body_no_dt = RussianDateTimeExtractor.extract_date_and_time(resched_m.group(1), now)
+            search_q = cls.TYPE_WORDS_STRIP.sub("", body_no_dt).strip(" ,.-?!")
+            search_q = re.sub(r"\b(?:на|в|к)\s*$", "", search_q, flags=re.IGNORECASE).strip(" ,.-?!")
+            if not search_q and llm_parsed and llm_parsed.get("search_query"):
+                search_q = llm_parsed["search_query"]
+
+            return {
+                "operation": "update",
+                "target_id": target_id,
+                "intent": None,
+                "intent_hint": intent_hint,
+                "action": None,
+                "new_action": None,
+                "date": final_date,
+                "time": final_time,
+                "search_query": search_q or body_no_dt
+            }
+
+        body = edit_m.group(1) if edit_m else clean
+        _, _, body_no_dt = RussianDateTimeExtractor.extract_date_and_time(body, now)
+        body_no_dt = re.sub(r"\b(?:на|в|к)\s*$", "", body_no_dt, flags=re.IGNORECASE).strip(" ,.-?!")
+
+        new_action: Optional[str] = None
+        new_intent: Optional[str] = None
+        search_q: str = body_no_dt
+
+        split_m = re.split(r"\s+(?:на|в)\s+", body_no_dt, maxsplit=1, flags=re.IGNORECASE)
+        if len(split_m) == 2:
+            left_part, right_part = split_m[0].strip(), split_m[1].strip()
+            search_q = cls.TYPE_WORDS_STRIP.sub("", left_part).strip(" ,.-?!")
+
+            right_lower = right_part.lower()
+            if right_lower in ("напоминание", "напоминалку"):
+                new_intent = "Reminder"
+            elif right_lower in ("встречу", "встреча"):
+                new_intent = "Meeting"
+            elif right_lower in ("задачу", "задача"):
+                new_intent = "Task"
+            elif right_part:
+                clean_new = cls.TYPE_WORDS_STRIP.sub("", right_part).strip(" ,.-?!")
+                if clean_new:
+                    new_action = clean_new[0].upper() + clean_new[1:]
+        else:
+            search_q = cls.TYPE_WORDS_STRIP.sub("", body_no_dt).strip(" ,.-?!")
+            llm_new_action = (llm_parsed or {}).get("new_action")
+            if llm_new_action and isinstance(llm_new_action, str):
+                candidate = llm_new_action.strip()
+                if candidate.lower() != search_q.lower() and not cls.is_update_command(candidate):
+                    new_action = candidate
+
+        if (llm_parsed or {}).get("search_query") and not search_q:
+            search_q = llm_parsed["search_query"]
+
+        return {
+            "operation": "update",
+            "target_id": target_id,
+            "intent": new_intent,
+            "intent_hint": intent_hint,
+            "action": new_action,
+            "new_action": new_action,
+            "date": final_date,
+            "time": final_time,
+            "search_query": search_q
+        }
+
+
 class RegexFallbackParser:
-    """
-    Запасной парсер на регулярных выражениях.
-    Поддерживает 3 типа (Task, Reminder, Meeting) и операции create, update, list_period, search, delete, complete.
-    """
+    """Запасной парсер на регулярных выражениях."""
 
     MEETING_KEYWORDS = ("встреч", "созвон", "обед с", "приём", "прием", "планёрк", "планерк", "стоматолог", "врач")
     REMINDER_KEYWORDS = ("напомни", "напоминан", "напоминалк", "не забыть", "не забудь")
@@ -52,7 +326,9 @@ class RegexFallbackParser:
 
         lower_text = clean.lower()
 
-        # 1. Удаление голосом
+        if VoiceUpdateExtractor.is_update_command(clean):
+            return VoiceUpdateExtractor.extract(clean, now)
+
         del_match = re.search(r"^(?:удали|удалить|убери|убрать|отмени|отменить|сотри)\s+(.+)", lower_text)
         if del_match:
             q = re.sub(r"\b(задачу|встречу|напоминание|напоминания|дело|про|по)\b", "", del_match.group(1)).strip(" ,.?!")
@@ -66,7 +342,6 @@ class RegexFallbackParser:
                 "search_query": q or del_match.group(1)
             }
 
-        # 2. Отметка выполненной голосом
         done_match = re.search(
             r"(?:отметь|отметить|заверши|завершить|выполнил[а]?|сделал[а]?|закрой|закрыть)\s+(.+)",
             lower_text
@@ -87,34 +362,6 @@ class RegexFallbackParser:
                 "search_query": q or clean
             }
 
-        # 3. Изменение / перенос задачи голосом
-        upd_match = re.search(r"^(?:перенеси|измени|поменяй|обнови|отредактируй)\s+(.+)", lower_text)
-        if upd_match:
-            body = upd_match.group(1)
-            parsed_time = None
-            t_m = re.search(r"\b([0-2]?\d):([0-5]\d)\b", body)
-            if t_m:
-                parsed_time = f"{int(t_m.group(1)):02d}:{int(t_m.group(2)):02d}"
-            parsed_date = None
-            if "послезавтра" in body:
-                parsed_date = (now + timedelta(days=2)).strftime("%Y-%m-%d")
-            elif "завтра" in body:
-                parsed_date = (now + timedelta(days=1)).strftime("%Y-%m-%d")
-            elif "сегодня" in body:
-                parsed_date = now.strftime("%Y-%m-%d")
-
-            q = re.sub(r"\b(задачу|встречу|напоминание|на завтра|на сегодня|на послезавтра|в\s+\d+[:\d]*)\b", "", body).strip(" ,.?!")
-            return {
-                "operation": "update",
-                "intent": None,
-                "action": None,
-                "date": parsed_date,
-                "end_date": None,
-                "time": parsed_time,
-                "search_query": q or body
-            }
-
-        # 4. Поиск старых задач
         search_match = re.search(r"(?:найди|найти|поищи|искать|когда\s+у\s+меня\s+был[аои]?)\s+(.+)", lower_text)
         if search_match or "найди ее" in lower_text or "найди её" in lower_text:
             q = re.sub(r"\b(задачу|встречу|напоминание|про|по|я когда-то ставил|найди ее|найди её)\b", "", lower_text).strip(" ,.?!")
@@ -128,7 +375,6 @@ class RegexFallbackParser:
                 "search_query": q or clean
             }
 
-        # 5. Просмотр планов за период
         if re.search(r"\b(что у меня|какие дела|какие задачи|какие встречи|какие напоминания|какие планы|есть ли встречи|что запланировано|покажи задачи|покажи встречи|покажи планы)\b", lower_text):
             start_date = now.strftime("%Y-%m-%d")
             end_date = start_date
@@ -161,48 +407,7 @@ class RegexFallbackParser:
             }
 
         intent = cls.detect_intent(lower_text)
-
-        parsed_time = None
-        time_match = re.search(r"\b([0-2]?\d):([0-5]\d)\b", lower_text)
-        if time_match:
-            h, m = int(time_match.group(1)), int(time_match.group(2))
-            if 0 <= h <= 23:
-                parsed_time = f"{h:02d}:{m:02d}"
-                clean = clean[:time_match.start()] + clean[time_match.end():]
-        else:
-            hour_match = re.search(r"\bв\s+([0-2]?\d)\s*(?:час(?:а|ов)?|вечера|утра|дня)?\b", lower_text)
-            if hour_match:
-                h = int(hour_match.group(1))
-                if ("вечер" in lower_text or "дня" in lower_text) and 1 <= h <= 11:
-                    h += 12
-                if 0 <= h <= 23:
-                    parsed_time = f"{h:02d}:00"
-                    clean = re.sub(r"\bв\s+[0-2]?\d\s*(?:час(?:а|ов)?|вечера|утра|дня)?\b", "", clean, flags=re.IGNORECASE)
-
-        parsed_date = None
-        if re.search(r"(?:^|\s)послезавтра(?=\s|$)", lower_text):
-            parsed_date = (now + timedelta(days=2)).strftime("%Y-%m-%d")
-            clean = re.sub(r"(?:^|\s)послезавтра(?=\s|$)", " ", clean, flags=re.IGNORECASE)
-        elif re.search(r"(?:^|\s)завтра(?=\s|$)", lower_text):
-            parsed_date = (now + timedelta(days=1)).strftime("%Y-%m-%d")
-            clean = re.sub(r"(?:^|\s)завтра(?=\s|$)", " ", clean, flags=re.IGNORECASE)
-        elif re.search(r"(?:^|\s)сегодня(?=\s|$)", lower_text):
-            parsed_date = now.strftime("%Y-%m-%d")
-            clean = re.sub(r"(?:^|\s)сегодня(?=\s|$)", " ", clean, flags=re.IGNORECASE)
-        elif re.search(r"(?:^|\s)вчера(?=\s|$)", lower_text):
-            parsed_date = (now - timedelta(days=1)).strftime("%Y-%m-%d")
-            clean = re.sub(r"(?:^|\s)вчера(?=\s|$)", " ", clean, flags=re.IGNORECASE)
-        else:
-            dm_match = re.search(r"\b(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?\b", lower_text)
-            if dm_match:
-                d, m = int(dm_match.group(1)), int(dm_match.group(2))
-                y = int(dm_match.group(3)) if dm_match.group(3) else now.year
-                try:
-                    dt = datetime(y, m, d)
-                    parsed_date = dt.strftime("%Y-%m-%d")
-                    clean = clean[:dm_match.start()] + clean[dm_match.end():]
-                except ValueError:
-                    parsed_date = None
+        parsed_date, parsed_time, clean = RussianDateTimeExtractor.extract_date_and_time(clean, now)
 
         for _ in range(3):
             clean = re.sub(cls.PARASITE_WORDS, " ", clean, flags=re.IGNORECASE)
@@ -313,9 +518,7 @@ class GigaChatOpenAIAdapter:
 
 class VoronaAgentCore:
     """
-    Ядро голосового ассистента «Ворона».
-    Поддерживает 3 типа (Задача, Напоминание, Встреча), создание, редактирование,
-    просмотр за период, семантический поиск, удаление и отметку выполнения.
+    Ядро голосового ассистента «Ворона» с изоляцией данных по аккаунтам пользователей (user_id).
     """
 
     def __init__(
@@ -331,8 +534,13 @@ class VoronaAgentCore:
         self.active_provider_idx = 0
 
         self.pending_buffer: Dict[str, Dict[str, Any]] = {}
+        self.rollback_buffer: Dict[str, Dict[str, Any]] = {}
         self.clarification_buffer: Dict[str, Dict[str, Any]] = {}
         self.fail_streak: Dict[str, int] = {}
+
+    @staticmethod
+    def _make_session_key(user_id: int, session_id: str) -> str:
+        return f"user_{user_id}_{session_id}"
 
     @staticmethod
     def _create_http_client() -> httpx.Client:
@@ -406,7 +614,6 @@ class VoronaAgentCore:
     ) -> List[Dict[str, Any]]:
         providers = []
 
-        # Приоритет №1: GigaChat напрямую (без VPN и без задержек)
         gigachat_creds = (os.getenv("GIGACHAT_CREDENTIALS") or os.getenv("GIGACHAT_API_KEY") or "").strip()
         gigachat_scope = (os.getenv("GIGACHAT_SCOPE") or "GIGACHAT_API_PERS").strip()
 
@@ -569,10 +776,10 @@ class VoronaAgentCore:
 
         return validated_date
 
-    def _register_failure(self, session_id: str, error_code: str, ui_status: str = "Не поняла") -> Dict[str, Any]:
-        logging.error(f"Code {error_code}: Processing failed for session {session_id}")
-        self.fail_streak[session_id] = self.fail_streak.get(session_id, 0) + 1
-        hint = "Говорите ближе к микрофону" if self.fail_streak[session_id] >= 3 else None
+    def _register_failure(self, session_key: str, error_code: str, ui_status: str = "Не поняла") -> Dict[str, Any]:
+        logging.error(f"Code {error_code}: Processing failed for session {session_key}")
+        self.fail_streak[session_key] = self.fail_streak.get(session_key, 0) + 1
+        hint = "Говорите ближе к микрофону" if self.fail_streak[session_key] >= 3 else None
         return {
             "ui_status": ui_status,
             "error_code": error_code,
@@ -581,11 +788,12 @@ class VoronaAgentCore:
             "data": None
         }
 
-    def _call_llm_json(self, raw_text: str, now: datetime) -> Optional[Dict[str, Any]]:
+    def _call_llm_json(self, raw_text: str, now: datetime, user_id: int = 1) -> Optional[Dict[str, Any]]:
         if not self.providers:
             return None
 
-        sys_prompt = build_system_prompt(now)
+        active_items = self.db.get_history(limit=20, status_filter="Active", sort_by="date", user_id=user_id)
+        sys_prompt = build_system_prompt(now, active_items=active_items)
 
         for attempt in range(len(self.providers)):
             idx = (self.active_provider_idx + attempt) % len(self.providers)
@@ -599,7 +807,7 @@ class VoronaAgentCore:
                         {"role": "user", "content": f"Текст: {raw_text}"}
                     ],
                     temperature=0.0,
-                    max_tokens=220
+                    max_tokens=250
                 )
                 content = response.choices[0].message.content or ""
 
@@ -630,45 +838,50 @@ class VoronaAgentCore:
         session_id: str = "default",
         audio_duration_sec: float = 2.0,
         now_override: Optional[datetime] = None,
-        auto_confirm: bool = False
+        auto_confirm: bool = False,
+        user_id: int = 1
     ) -> Dict[str, Any]:
         now = now_override or datetime.now()
         today_str = now.strftime("%Y-%m-%d")
+        session_key = self._make_session_key(user_id, session_id)
 
         if audio_duration_sec < 0.5:
-            return self._register_failure(session_id, "E02", "Не поняла")
+            return self._register_failure(session_key, "E02", "Не поняла")
 
         if not raw_text or len(raw_text.strip()) < 2:
-            return self._register_failure(session_id, "E01", "Не поняла")
+            return self._register_failure(session_key, "E01", "Не поняла")
 
         clean_input = raw_text.strip()
 
-        if session_id in self.clarification_buffer:
-            prev_draft = self.clarification_buffer.pop(session_id)
+        if session_key in self.clarification_buffer:
+            prev_draft = self.clarification_buffer.pop(session_key)
             clean_input = f"{prev_draft.get('original_text', '')} {clean_input}".strip()
 
         parse_method = "llm"
-        parsed_data = self._call_llm_json(clean_input, now)
+        parsed_data = self._call_llm_json(clean_input, now, user_id=user_id)
 
         if not isinstance(parsed_data, dict) or "operation" not in parsed_data:
             parse_method = "regex"
             parsed_data = RegexFallbackParser.parse(clean_input, now)
             if not parsed_data:
-                return self._register_failure(session_id, "E07", "Не поняла формат")
+                return self._register_failure(session_key, "E07", "Не поняла формат")
+
+        if VoiceUpdateExtractor.is_update_command(clean_input) or parsed_data.get("operation") == "update":
+            parsed_data = VoiceUpdateExtractor.extract(clean_input, now, llm_parsed=parsed_data)
 
         operation = parsed_data.get("operation")
 
         if operation == "none" or (operation == "create" and not parsed_data.get("action")):
-            return self._register_failure(session_id, "E03_E04", "Не поняла")
+            return self._register_failure(session_key, "E03_E04", "Не поняла")
 
-        self.fail_streak[session_id] = 0
+        self.fail_streak[session_key] = 0
+        self.rollback_buffer.pop(session_key, None)
 
-        # Сценарий: Просмотр планов за период
         if operation == "list_period":
             start_d = self._validate_calendar_date(parsed_data.get("date")) or today_str
             end_d = self._validate_calendar_date(parsed_data.get("end_date")) or start_d
             intent_filter = parsed_data.get("intent")
-            items = self.db.get_items_by_period(start_d, end_d, intent_filter)
+            items = self.db.get_items_by_period(start_d, end_d, intent_filter, user_id=user_id)
             return {
                 "ui_status": "Список событий",
                 "operation": "list_period",
@@ -678,10 +891,9 @@ class VoronaAgentCore:
                 "items": items
             }
 
-        # Сценарий: Семантический поиск
         if operation == "search":
             query = parsed_data.get("search_query") or parsed_data.get("action") or clean_input
-            found = self.db.search_past_items(query)
+            found = self.db.search_past_items(query, user_id=user_id)
             return {
                 "ui_status": "Результаты поиска",
                 "operation": "search",
@@ -690,10 +902,13 @@ class VoronaAgentCore:
                 "items": found
             }
 
-        # Сценарий: Удаление голосом (из БД + из системного Календаря)
         if operation == "delete":
             query = parsed_data.get("search_query") or parsed_data.get("action") or clean_input
-            deleted_item = self.db.find_and_delete_by_query(query)
+            deleted_item = self.db.find_and_delete_by_query(
+                query,
+                target_id=parsed_data.get("target_id"),
+                user_id=user_id
+            )
             return {
                 "ui_status": "Удалено" if deleted_item else "Не найдено",
                 "operation": "delete",
@@ -702,10 +917,13 @@ class VoronaAgentCore:
                 "deleted": deleted_item
             }
 
-        # Сценарий: Отметка выполнения голосом
         if operation == "complete":
             query = parsed_data.get("search_query") or parsed_data.get("action") or clean_input
-            completed_item = self.db.find_and_complete_by_query(query)
+            completed_item = self.db.find_and_complete_by_query(
+                query,
+                target_id=parsed_data.get("target_id"),
+                user_id=user_id
+            )
             return {
                 "ui_status": "Выполнено" if completed_item else "Не найдено",
                 "operation": "complete",
@@ -714,33 +932,74 @@ class VoronaAgentCore:
                 "completed": completed_item
             }
 
-        # Сценарий: Редактирование / перенос задачи голосом
         if operation == "update":
             query = parsed_data.get("search_query") or clean_input
-            new_action = parsed_data.get("action")
+            target_id = parsed_data.get("target_id")
+            intent_hint = parsed_data.get("intent_hint")
+            new_action = parsed_data.get("new_action") or parsed_data.get("action")
             new_date = self._validate_calendar_date(parsed_data.get("date"))
             new_time = self._validate_time(parsed_data.get("time"))
             new_intent = parsed_data.get("intent") if parsed_data.get("intent") in VALID_INTENTS else None
 
-            updated_item = self.db.find_and_update_by_query(
+            target_item = self.db.find_best_matching_item(
                 query_text=query,
-                new_action=new_action,
-                new_date=new_date,
-                new_time=new_time,
-                new_intent=new_intent
+                target_id=target_id,
+                intent_hint=intent_hint,
+                only_active=True,
+                user_id=user_id
             )
+
+            if not target_item:
+                return {
+                    "ui_status": "Не найдено",
+                    "operation": "update",
+                    "requires_confirmation": False,
+                    "search_query": query,
+                    "updated": None
+                }
+
+            if new_action and (
+                new_action.strip().lower() == target_item["action"].strip().lower()
+                or VoiceUpdateExtractor.is_update_command(new_action)
+                or new_action.strip().lower() in query.strip().lower()
+            ):
+                new_action = None
+
+            if not new_action and not new_date and not new_time and not new_intent:
+                self.clarification_buffer[session_key] = {
+                    "original_text": f"Измени задачу {target_item['action']} на",
+                    "partial_data": parsed_data
+                }
+                return {
+                    "ui_status": "Уточнение",
+                    "operation": "clarify",
+                    "requires_confirmation": False,
+                    "question": f"На какое время, дату или текст изменить запись «{target_item['action']}»?"
+                }
+
+            self.rollback_buffer[session_key] = dict(target_item)
+
+            updated_item = self.db.update_item(
+                task_id=target_item["id"],
+                action=new_action if new_action else None,
+                parsed_date=new_date if new_date is not None else "__UNSET__",
+                parsed_time=new_time if new_time is not None else "__UNSET__",
+                intent=new_intent,
+                user_id=user_id
+            )
+
             return {
                 "ui_status": "Обновлено" if updated_item else "Не найдено",
                 "operation": "update",
                 "requires_confirmation": False,
                 "search_query": query,
+                "old_item": target_item,
                 "updated": updated_item
             }
 
-        # Сценарий: Уточняющий вопрос
         if operation == "clarify":
             question = parsed_data.get("action") or "Уточните, пожалуйста, дату или время."
-            self.clarification_buffer[session_id] = {
+            self.clarification_buffer[session_key] = {
                 "original_text": clean_input,
                 "partial_data": parsed_data
             }
@@ -751,7 +1010,6 @@ class VoronaAgentCore:
                 "question": question
             }
 
-        # Определение типа: Task, Reminder или Meeting
         intent = parsed_data.get("intent")
         if intent not in VALID_INTENTS:
             intent = RegexFallbackParser.detect_intent(clean_input.lower())
@@ -760,7 +1018,7 @@ class VoronaAgentCore:
 
         action = (parsed_data.get("action") or "").strip()
         if not action:
-            return self._register_failure(session_id, "E04", "Не поняла")
+            return self._register_failure(session_key, "E04", "Не поняла")
 
         raw_date = parsed_data.get("date")
         validated_date = self._validate_calendar_date(raw_date)
@@ -784,9 +1042,10 @@ class VoronaAgentCore:
 
         conflicts = []
         if intent == "Meeting" and validated_date and validated_time:
-            conflicts = self.db.check_meeting_conflict(validated_date, validated_time)
+            conflicts = self.db.check_meeting_conflict(validated_date, validated_time, user_id=user_id)
 
         staged_record = {
+            "user_id": user_id,
             "intent": intent,
             "raw_text": clean_input,
             "action": action,
@@ -799,10 +1058,10 @@ class VoronaAgentCore:
             "now_override": now
         }
 
-        self.pending_buffer[session_id] = staged_record
+        self.pending_buffer[session_key] = staged_record
 
         if auto_confirm:
-            return self.confirm_pending(session_id)
+            return self.confirm_pending(session_id=session_id, user_id=user_id)
 
         return {
             "ui_status": "Подтверждение",
@@ -821,8 +1080,10 @@ class VoronaAgentCore:
             }
         }
 
-    def confirm_pending(self, session_id: str = "default") -> Dict[str, Any]:
-        staged = self.pending_buffer.get(session_id)
+    def confirm_pending(self, session_id: str = "default", user_id: int = 1) -> Dict[str, Any]:
+        session_key = self._make_session_key(user_id, session_id)
+        self.rollback_buffer.pop(session_key, None)
+        staged = self.pending_buffer.get(session_key)
         if not staged:
             return {"ui_status": "Готова", "operation": "noop", "requires_confirmation": False, "saved": None}
 
@@ -835,9 +1096,10 @@ class VoronaAgentCore:
                 parsed_time=staged["parsed_time"],
                 date_in_past=staged["date_in_past"],
                 parse_method=staged["parse_method"],
-                now_override=staged.get("now_override")
+                now_override=staged.get("now_override"),
+                user_id=user_id
             )
-            self.pending_buffer.pop(session_id, None)
+            self.pending_buffer.pop(session_key, None)
             return {
                 "ui_status": "Зафиксировано",
                 "operation": "create",
@@ -853,9 +1115,23 @@ class VoronaAgentCore:
                 "saved": None
             }
 
-    def cancel_pending(self, session_id: str = "default") -> Dict[str, Any]:
-        self.pending_buffer.pop(session_id, None)
-        self.clarification_buffer.pop(session_id, None)
+    def cancel_pending(self, session_id: str = "default", user_id: int = 1) -> Dict[str, Any]:
+        session_key = self._make_session_key(user_id, session_id)
+        self.pending_buffer.pop(session_key, None)
+        self.clarification_buffer.pop(session_key, None)
+
+        prev_state = self.rollback_buffer.pop(session_key, None)
+        if prev_state:
+            self.db.update_item(
+                task_id=prev_state["id"],
+                action=prev_state["action"],
+                parsed_date=prev_state["parsed_date"],
+                parsed_time=prev_state["parsed_time"],
+                intent=prev_state["intent"],
+                status=prev_state["status"],
+                user_id=user_id
+            )
+
         return {
             "ui_status": "Готова",
             "operation": "cancel",
@@ -879,7 +1155,6 @@ def get_shared_agent() -> VoronaAgentCore:
 
 
 def format_spoken_response(result: Dict[str, Any]) -> str:
-    """Формирует естественный голосовой ответ на русском языке для озвучки и вывода в UI."""
     ui_status = result.get("ui_status", "")
     operation = result.get("operation", "")
 
@@ -908,11 +1183,14 @@ def format_spoken_response(result: Dict[str, Any]) -> str:
 
     if operation == "update":
         updated = result.get("updated")
+        old_item = result.get("old_item") or {}
         if updated:
             kind = get_intent_label_ru(updated.get("intent"))
             d_part = f" на {updated['parsed_date']}" if updated.get("parsed_date") else ""
             t_part = f" в {updated['parsed_time']}" if updated.get("parsed_time") else ""
-            return f"Обновила ({kind.lower()}): «{updated['action']}»{d_part}{t_part}."
+            if old_item.get("action") and old_item.get("action") != updated.get("action"):
+                return f"Изменила «{old_item['action']}» на «{updated['action']}»{d_part}{t_part}."
+            return f"Перенесла ({kind.lower()}): «{updated['action']}»{d_part}{t_part}."
         return f"Не нашла запись «{result.get('search_query', '')}» для изменения."
 
     if ui_status == "Подтверждение":
@@ -979,18 +1257,20 @@ def run_agent_turn(
     user_query: str,
     history: Optional[List[Dict[str, str]]] = None,
     session_id: str = "default",
-    audio_duration_sec: float = 2.0
+    audio_duration_sec: float = 2.0,
+    user_id: int = 1
 ) -> Dict[str, Any]:
     agent = get_shared_agent()
+    session_key = agent._make_session_key(user_id, session_id)
     clean_lower = user_query.strip().lower().strip(".,!?")
 
-    if session_id in agent.pending_buffer:
+    if session_key in agent.pending_buffer:
         if clean_lower in CONFIRM_WORDS:
-            res = agent.confirm_pending(session_id)
+            res = agent.confirm_pending(session_id=session_id, user_id=user_id)
             res["spoken_response"] = format_spoken_response(res)
             return res
         if clean_lower in CANCEL_WORDS:
-            res = agent.cancel_pending(session_id)
+            res = agent.cancel_pending(session_id=session_id, user_id=user_id)
             res["spoken_response"] = format_spoken_response(res)
             return res
 
@@ -998,12 +1278,13 @@ def run_agent_turn(
         raw_text=user_query,
         session_id=session_id,
         audio_duration_sec=audio_duration_sec,
-        auto_confirm=False
+        auto_confirm=False,
+        user_id=user_id
     )
     res["spoken_response"] = format_spoken_response(res)
     return res
 
 
-def run_agent_loop(user_query: str, history: Optional[List[Dict[str, str]]] = None) -> str:
-    turn_result = run_agent_turn(user_query=user_query, history=history)
+def run_agent_loop(user_query: str, history: Optional[List[Dict[str, str]]] = None, user_id: int = 1) -> str:
+    turn_result = run_agent_turn(user_query=user_query, history=history, user_id=user_id)
     return turn_result["spoken_response"]
