@@ -60,7 +60,7 @@
 }
 .history-link {
   position: absolute;
-  left: calc(var(--u) * 343);
+  left: calc(var(--u) * 313);
   top: calc(var(--u) * 751);
   font-size: calc(var(--u) * 20);
   white-space: nowrap;

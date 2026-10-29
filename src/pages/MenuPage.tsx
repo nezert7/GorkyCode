@@ -197,7 +197,7 @@ export default function MenuPage() {
 
         {mode !== 'listening' && (
           <Link to="/history" className={historyClass}>
-            история запросов
+            сохранённые запросы
           </Link>
         )}
 

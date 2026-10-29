@@ -37,7 +37,7 @@
 }
 
 .history-link--result {
-  left: calc(var(--u) * 266);
+  left: calc(var(--u) * 246);
   top: calc(var(--u) * 760);
 }
 
