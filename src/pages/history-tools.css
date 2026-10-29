@@ -1,0 +1,90 @@
+/* Экран истории: поиск, фильтр по типу и кнопки у записей.
+   Заголовок "Планы птичьего полёта" убран, чтобы освободить место (как в сборке бэкендера). */
+.history-tools {
+  position: absolute;
+  left: calc(var(--u) * 16);
+  right: calc(var(--u) * 16);
+  top: calc(var(--u) * 10);
+  display: flex;
+  gap: calc(var(--u) * 8);
+}
+
+.history-tools input[type='text'] {
+  flex: 1;
+  min-width: calc(var(--u) * 150);
+}
+
+.history-tools input,
+.history-tools select,
+.history-tools button,
+.history-row input,
+.history-row select,
+.history-row button {
+  font-family: inherit;
+  font-size: calc(var(--u) * 11);
+  padding: calc(var(--u) * 4) calc(var(--u) * 6);
+  border: calc(var(--u) * 2) solid var(--ink);
+  border-radius: 0;
+  background: #fff;
+  color: var(--ink);
+}
+
+.history-row button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.history-scroll {
+  top: calc(var(--u) * 52);
+}
+
+.history-list .history-row {
+  display: flex;
+  gap: calc(var(--u) * 10);
+  align-items: center;
+}
+
+.history-row--edit {
+  flex-wrap: wrap;
+}
+
+.history-edit-text {
+  flex: 1;
+  min-width: calc(var(--u) * 200);
+}
+
+.history-row--done {
+  opacity: 0.55;
+}
+.history-row--done .plan-text {
+  text-decoration: line-through;
+}
+
+.plan-date {
+  min-width: calc(var(--u) * 82);
+}
+.plan-time {
+  min-width: calc(var(--u) * 42);
+}
+.plan-type {
+  min-width: calc(var(--u) * 95);
+  font-size: calc(var(--u) * 10);
+  color: #444;
+}
+.plan-type--meeting {
+  color: var(--navy);
+}
+.plan-type--reminder {
+  color: #8a4b00;
+}
+.plan-text {
+  flex: 1;
+}
+
+.history-row button[title] {
+  padding: calc(var(--u) * 2) calc(var(--u) * 5);
+}
+
+.history-error {
+  margin-bottom: calc(var(--u) * 6);
+}

@@ -34,7 +34,6 @@ function describeError(error: unknown): string {
 export default function MenuPage() {
   const [mode, setMode] = useState<Mode>('idle')
   const [generatedText, setGeneratedText] = useState('')
-  const [generatedText, setGeneratedText] = useState('')
   const [operation, setOperation] = useState('') // <--- ДОБАВИТЬ ЭТО
   const [errorText, setErrorText] = useState('')
   const [busy, setBusy] = useState(false) // true, пока ждём микрофон или сервер

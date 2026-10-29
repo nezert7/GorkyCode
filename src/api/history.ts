@@ -1,4 +1,4 @@
-import { request, useFakeApi } from './client'
+import { request } from './client'
 
 export type PlanType = 'task' | 'meeting' | 'reminder'
 export type PlanStatus = 'pending' | 'done'
@@ -49,16 +49,20 @@ function formatDate(date: string): string {
   return match ? `${match[3]}.${match[2]}.${match[1]}` : date
 }
 
+// "30.10.2007" -> "2007-10-30" (формат, который понимают поля выбора даты)
+export function toInputDate(date: string): string {
+  return date.includes('.') ? date.split('.').reverse().join('-') : date
+}
+
 // "10:00:00" -> "10:00". "00:00" считаем отсутствием времени
 function formatTime(time: string): string {
   const short = time.slice(0, 5)
   return short === '00:00' ? '' : short
 }
 
-// ВАЖНО: названия полей в БД я не видел (файла database.py у меня нет), поэтому ниже
-// перечислены вероятные варианты. Если в консоли браузера (F12) появится предупреждение
-// "Не удалось прочитать запись", пришлите его, и я подставлю точные названия.
-// ВАЖНО: Добавлены правильные названия полей из твоего database.py: 'action', 'parsed_date', 'parsed_time'
+// Названия полей из database.py: action, parsed_date, parsed_time, intent.
+// Остальные названия в списках - запасные варианты. Если в консоли браузера (F12) появится
+// предупреждение "Не удалось прочитать запись", значит, название поля изменилось.
 function fromServer(raw: ServerItem, index: number): Plan {
   const intent = asString(pick(raw, ['intent', 'type', 'kind'])).toLowerCase()
   const type: PlanType = intent.includes('meet')
@@ -71,13 +75,16 @@ function fromServer(raw: ServerItem, index: number): Plan {
   const doneFlag = pick(raw, ['is_done', 'done', 'completed'])
   const status: PlanStatus = statusText === 'done' || doneFlag === true ? 'done' : 'pending'
 
-  // Сюда добавили 'parsed_date' и 'parsed_time'
-  const dateRaw = asString(pick(raw, ['parsed_date', 'date', 'due_date', 'start_date', 'scheduled_date', 'deadline', 'datetime', 'start', 'due']))
+  const dateRaw = asString(
+    pick(raw, ['parsed_date', 'date', 'due_date', 'start_date', 'scheduled_date', 'deadline', 'datetime', 'start', 'due']),
+  )
   const timeRaw =
-    asString(pick(raw, ['parsed_time', 'time', 'start_time', 'due_time'])) || (/[T ](\d{2}:\d{2})/.exec(dateRaw)?.[1] ?? '')
+    asString(pick(raw, ['parsed_time', 'time', 'start_time', 'due_time'])) ||
+    (/[T ](\d{2}:\d{2})/.exec(dateRaw)?.[1] ?? '')
 
-  // Сюда добавили 'action' (так колонка называется в твоей SQLite)
-  const text = asString(pick(raw, ['action', 'title', 'text', 'description', 'name', 'content', 'summary', 'task']))
+  const text = asString(
+    pick(raw, ['action', 'title', 'text', 'description', 'name', 'content', 'summary', 'task']),
+  )
   if (!text) {
     console.warn('Не удалось прочитать запись, пришлите её разработчику:', raw)
   }
@@ -97,10 +104,10 @@ function fromServer(raw: ServerItem, index: number): Plan {
 
 // ---------- Запросы к серверу ----------
 
-// Убрали блок if (useFakeApi), чтобы запрос реально улетал на сервер
+// Все запросы к спискам идут через эту функцию. Сервер отвечает { items: [...] }
 async function fetchPlans(path: string): Promise<Plan[]> {
   const data = await request<{ items?: ServerItem[] }>(path)
-  return (data.items ?? []).map(fromServer)
+  return (data?.items ?? []).map(fromServer)
 }
 
 // Все записи (экран "история запросов"). Сервер отдаёт максимум 200 за раз.
@@ -130,4 +137,43 @@ export async function searchPlans(query: string): Promise<Plan[]> {
     const haystack = `${plan.text} ${plan.date} ${plan.time} ${planTypeLabels[plan.type]}`.toLowerCase()
     return words.every((word) => haystack.includes(word))
   })
+}
+
+// ---------- Изменение записей ----------
+
+// Отметить запись выполненной
+export async function markDone(id: number): Promise<void> {
+  await request<unknown>(`/api/tasks/${id}/done`, { method: 'POST' })
+}
+
+export type PlanChanges = {
+  text: string
+  date: string // "2007-10-30" или пустая строка
+  time: string // "10:00" или пустая строка
+  type: PlanType
+}
+
+const serverIntent: Record<PlanType, string> = {
+  task: 'Task',
+  meeting: 'Meeting',
+  reminder: 'Reminder',
+}
+
+// Изменить текст, дату, время или тип записи
+export async function updatePlan(id: number, changes: PlanChanges): Promise<void> {
+  await request<unknown>(`/api/tasks/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      action: changes.text,
+      parsed_date: changes.date || null,
+      parsed_time: changes.time || null,
+      intent: serverIntent[changes.type],
+    }),
+  })
+}
+
+// Удалить запись (из списка и из календаря)
+export async function deletePlan(id: number): Promise<void> {
+  await request<unknown>(`/api/tasks/${id}`, { method: 'DELETE' })
 }
