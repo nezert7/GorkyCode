@@ -1,5 +1,7 @@
 import os
 import shutil
+import threading
+import time
 from typing import Optional, Dict, Any, List
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,7 +9,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from database import CalendarIntegration
+from database import CalendarIntegration, get_intent_label_ru
 from prompts_and_memory import MemoryManager
 from voice_service import VoiceService
 from agent_core import run_agent_turn, get_shared_agent, format_spoken_response
@@ -28,6 +30,32 @@ voice_service = VoiceService()
 TEMP_DIR = "temp_audio"
 os.makedirs(TEMP_DIR, exist_ok=True)
 
+# Очередь сработавших фоновых уведомлений (за 1 час до задачи) для показа в UI
+_pending_ui_notifications: List[Dict[str, Any]] = []
+
+
+def _background_notification_worker():
+    """Фоновый поток: каждые 30 сек проверяет задачи, до которых остался 1 час, и шлёт пуш-уведомление."""
+    while True:
+        try:
+            agent = get_shared_agent()
+            due_items = agent.db.check_and_trigger_upcoming_notifications()
+            for item in due_items:
+                kind = get_intent_label_ru(item.get("intent"))
+                msg = f"Напоминание за час! {kind}: «{item.get('action')}» в {item.get('parsed_time')}."
+                _pending_ui_notifications.append({
+                    "id": item.get("id"),
+                    "message": msg,
+                    "item": item
+                })
+                print(f"🔔 [УВЕДОМЛЕНИЕ ЗА ЧАС] {msg}")
+        except Exception:
+            pass
+        time.sleep(30)
+
+
+threading.Thread(target=_background_notification_worker, daemon=True).start()
+
 
 class TextQueryRequest(BaseModel):
     query: str
@@ -37,6 +65,14 @@ class TextQueryRequest(BaseModel):
 
 class SessionActionRequest(BaseModel):
     session_id: str = "default"
+
+
+class TaskUpdateRequest(BaseModel):
+    action: Optional[str] = None
+    parsed_date: Optional[str] = "__UNSET__"
+    parsed_time: Optional[str] = "__UNSET__"
+    intent: Optional[str] = None
+    status: Optional[str] = None
 
 
 class TextQueryResponse(BaseModel):
@@ -65,7 +101,13 @@ async def _build_response_with_tts(turn_result: Dict[str, Any]) -> TextQueryResp
         ui_status=turn_result.get("ui_status"),
         operation=turn_result.get("operation"),
         requires_confirmation=turn_result.get("requires_confirmation", False),
-        data=turn_result.get("data") or turn_result.get("saved") or turn_result.get("deleted") or turn_result.get("completed"),
+        data=(
+            turn_result.get("data")
+            or turn_result.get("saved")
+            or turn_result.get("deleted")
+            or turn_result.get("completed")
+            or turn_result.get("updated")
+        ),
         items=turn_result.get("items"),
         error_code=turn_result.get("error_code"),
         hint=turn_result.get("hint")
@@ -135,11 +177,10 @@ async def cancel_pending_endpoint(req: SessionActionRequest = SessionActionReque
 async def get_history_endpoint(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
-    intent: Optional[str] = Query(None, description="Task или Meeting"),
+    intent: Optional[str] = Query(None, description="Task, Reminder или Meeting"),
     status: Optional[str] = Query(None, description="Active или Done"),
     sort_by: str = Query("created_desc", description="created_desc | type | date")
 ):
-    """Возвращает историю с поддержкой фильтрации и сортировки по типу задачи."""
     agent = get_shared_agent()
     items = agent.db.get_history(
         limit=limit,
@@ -155,13 +196,29 @@ async def get_history_endpoint(
 async def get_tasks_by_period_endpoint(
     start_date: str = Query(..., description="YYYY-MM-DD"),
     end_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
-    intent: Optional[str] = Query(None, description="Task или Meeting"),
+    intent: Optional[str] = Query(None, description="Task, Reminder или Meeting"),
     sort_by: str = Query("date", description="date или type")
 ):
-    """Поиск задач за определённый период с сортировкой по типу."""
     agent = get_shared_agent()
     items = agent.db.get_items_by_period(start_date, end_date or start_date, intent, sort_by=sort_by)
     return {"items": items}
+
+
+@app.put("/api/tasks/{task_id}")
+async def update_task_endpoint(task_id: int, req: TaskUpdateRequest):
+    """Редактирование текста, даты, времени, типа или статуса задачи с синхронизацией Календаря."""
+    agent = get_shared_agent()
+    updated = agent.db.update_item(
+        task_id=task_id,
+        action=req.action,
+        parsed_date=req.parsed_date,
+        parsed_time=req.parsed_time,
+        intent=req.intent,
+        status=req.status
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return {"status": "updated", "item": updated}
 
 
 @app.post("/api/tasks/{task_id}/done")
@@ -176,7 +233,7 @@ async def mark_task_done_endpoint(task_id: int):
 
 @app.delete("/api/tasks/{task_id}")
 async def delete_task_endpoint(task_id: int):
-    """Удаляет задачу по ID."""
+    """Удаляет задачу по ID из SQLite и из системного Календаря."""
     agent = get_shared_agent()
     ok = agent.db.delete_item(task_id)
     if not ok:
@@ -184,9 +241,16 @@ async def delete_task_endpoint(task_id: int):
     return {"status": "deleted", "task_id": task_id}
 
 
+@app.get("/api/notifications")
+async def pop_upcoming_notifications():
+    """Возвращает сработавшие уведомления (за 1 час до задачи) для отображения в UI."""
+    items = list(_pending_ui_notifications)
+    _pending_ui_notifications.clear()
+    return {"notifications": items}
+
+
 @app.get("/api/calendar.ics")
 async def export_ics_calendar():
-    """Скачивание и импорт реального календарного файла .ics во внешние календари."""
     agent = get_shared_agent()
     items = agent.db.get_history(limit=200)
     ics_text = CalendarIntegration.export_all_to_ics(items)

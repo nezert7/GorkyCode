@@ -1,6 +1,19 @@
-BEGIN:VCALENDAR
-VERSION:2.0
-PRODID:-//Vorona Voice Assistant//RU
-CALSCALE:GREGORIAN
-METHOD:PUBLISH
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Vorona Voice Assistant//RU
+CALSCALE:GREGORIAN
+METHOD:PUBLISH
+BEGIN:VEVENT
+UID:vorona-task-11@vorona.local
+DTSTART:20261029T132500
+DTEND:20261029T142500
+SUMMARY:[Напоминание] Сходить в зал
+DESCRIPTION:Создано голосовым ассистентом Ворона (Поставь напоминания, на сегодня сходить в зал 13 часов 25 минут.) [VORONA_ID:11]
+STATUS:CONFIRMED
+BEGIN:VALARM
+TRIGGER:-PT60M
+ACTION:DISPLAY
+DESCRIPTION:Напоминание: Сходить в зал
+END:VALARM
+END:VEVENT
 END:VCALENDAR

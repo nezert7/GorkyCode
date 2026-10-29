@@ -1,9 +1,28 @@
 import os
+import sys
 import threading
 import time
 import uvicorn
 import webview
 import requests
+
+if sys.platform == "darwin":
+    try:
+        import objc
+        from webview.platforms import cocoa
+
+        @objc.typedSelector(b"v@:@@@q@?")
+        def webView_requestMediaCapturePermissionForOrigin_initiatedByFrame_type_decisionHandler_(
+            self, webview_instance, origin, frame, capture_type, decision_handler
+        ):
+            decision_handler(1)
+
+        cocoa.UIWebUIDelegate.webView_requestMediaCapturePermissionForOrigin_initiatedByFrame_type_decisionHandler_ = (
+            webView_requestMediaCapturePermissionForOrigin_initiatedByFrame_type_decisionHandler_
+        )
+        print("[*] WebKit: доступ к микрофону успешно разрешён.")
+    except Exception as e:
+        print(f"[*] WebKit mic patch info: {e}")
 
 
 def run_server():
@@ -23,18 +42,17 @@ def wait_for_server(url: str, timeout: int = 15) -> bool:
 
 
 def main():
-    server_url = "http://127.0.0.1:8000"
+    server_url = "http://localhost:8000" if sys.platform == "darwin" else "http://127.0.0.1:8000"
+    check_url = "http://127.0.0.1:8000"
 
     server_thread = threading.Thread(target=run_server, daemon=True)
     server_thread.start()
 
     print("[*] Запуск локального сервера FastAPI...")
-    if not wait_for_server(server_url):
+    if not wait_for_server(check_url):
         print("[!] Сервер не ответил вовремя. Проверьте порт 8000.")
         return
 
-    # Если React-фронтенд еще не собран в static_frontend/index.html,
-    # открываем интерактивную панель /docs, чтобы тестировать API в окне
     frontend_index = os.path.join(os.path.dirname(__file__), "static_frontend", "index.html")
     target_url = server_url if os.path.exists(frontend_index) else f"{server_url}/docs"
 
@@ -49,7 +67,7 @@ def main():
         min_size=(800, 600)
     )
 
-    webview.start(debug=True)
+    webview.start(debug=False)
 
 
 if __name__ == "__main__":

@@ -11,7 +11,6 @@ from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
-# === ФИКС НЕСОВМЕСТИМОСТИ PYAV И FASTER-WHISPER (metadata_errors) ===
 try:
     import av
     _orig_av_open = av.open
