@@ -40,3 +40,21 @@
   left: calc(var(--u) * 266);
   top: calc(var(--u) * 760);
 }
+
+
+/* Добавь это в конец файла menu-result.css */
+
+.result-action--reply {
+  left: calc(var(--u) * 60);
+  top: calc(var(--u) * 699);
+}
+
+.result-action--continue-middle {
+  left: calc(var(--u) * 310);
+  top: calc(var(--u) * 699);
+}
+
+.result-action--cancel-right {
+  left: calc(var(--u) * 600);
+  top: calc(var(--u) * 699);
+}

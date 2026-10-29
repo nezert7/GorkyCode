@@ -1,20 +1,25 @@
 import { request } from './client'
 
 // Отправляет запись голоса на сервер и возвращает ответ от нейросети
-export async function recognizeSpeech(audio: Blob): Promise<string> {
-  const body = new FormData()
+// Теперь возвращаем объект с текстом и типом операции
+export type VoiceResponse = {
+  text: string
+  operation: string
+}
 
-  // В main.py бэкенд ждет файл именно под именем 'file'
+export async function recognizeSpeech(audio: Blob): Promise<VoiceResponse> {
+  const body = new FormData()
   body.append('file', audio, 'record.webm')
 
-  // Отправляем на правильный эндпоинт FastAPI
-  const result = await request<{ response: string }>('/api/voice-chat', {
+  const result = await request<{ response: string; operation: string }>('/api/voice-chat', {
     method: 'POST',
     body,
   })
 
-  // Бэкенд возвращает текстовый ответ в поле response
-  return result.response
+  return {
+    text: result.response,
+    operation: result.operation, // Передаем на интерфейс тип операции (например, "clarify")
+  }
 }
 
 // Сохраняет запись после нажатия на "продолжить"
@@ -34,4 +39,20 @@ export async function cancelPending(): Promise<void> {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ session_id: 'default' }),
   })
+}
+
+// (остальной код файла voice.ts остается без изменений, добавляем только это вниз)
+
+// Тайная отправка текстового ответа, чтобы пропустить уточнение
+export async function sendText(text: string): Promise<VoiceResponse> {
+  const response = await request<{ response: string; operation: string }>('/api/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query: text, session_id: 'default' }),
+  })
+
+  return {
+    text: response.response,
+    operation: response.operation,
+  }
 }

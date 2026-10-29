@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import Logo from '../components/Logo'
-import { cancelPending, recognizeSpeech, savePlan } from '../api/voice'
+import { cancelPending, recognizeSpeech, savePlan, sendText } from '../api/voice'
 import { useVoiceRecorder } from '../hooks/useVoiceRecorder'
 import crow from '../assets/crow.png'
 import crowListening from '../assets/crow-listening.png'
@@ -34,6 +34,8 @@ function describeError(error: unknown): string {
 export default function MenuPage() {
   const [mode, setMode] = useState<Mode>('idle')
   const [generatedText, setGeneratedText] = useState('')
+  const [generatedText, setGeneratedText] = useState('')
+  const [operation, setOperation] = useState('') // <--- ДОБАВИТЬ ЭТО
   const [errorText, setErrorText] = useState('')
   const [busy, setBusy] = useState(false) // true, пока ждём микрофон или сервер
   const { start, stop, cancel } = useVoiceRecorder()
@@ -53,7 +55,9 @@ export default function MenuPage() {
         setMode('listening')
       } else {
         const audio = await stop()
-        setGeneratedText(await recognizeSpeech(audio))
+        const res = await recognizeSpeech(audio) // <--- МЕНЯЕМ ЭТИ 3 СТРОКИ
+        setGeneratedText(res.text)               // <---
+        setOperation(res.operation)              // <---
         setMode('result')
       }
     } catch (error) {
@@ -69,6 +73,34 @@ export default function MenuPage() {
     try {
       await savePlan()
       setMode('saved')
+    } catch (error) {
+      fail(error)
+    } finally {
+      setBusy(false)
+    }
+  }
+  // Функция для ответа на уточняющий вопрос нейросети
+  async function handleReply() {
+    if (busy) return
+    setBusy(true)
+    try {
+      await start() // Снова включаем микрофон
+      setMode('listening') // Переводим интерфейс в режим записи
+    } catch (error) {
+      fail(error)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function handleForceContinue() {
+    if (busy) return
+    setBusy(true)
+    try {
+      // Симулируем ответ пользователя, чтобы LLM сама проставила дефолты
+      const res = await sendText('Оставь как есть, поставь время по умолчанию')
+      setGeneratedText(res.text)
+      setOperation(res.operation)
     } catch (error) {
       fail(error)
     } finally {
@@ -127,20 +159,29 @@ export default function MenuPage() {
         {mode === 'result' && (
           <>
             <div className="result-box">{generatedText}</div>
-            <button
-              className="result-action result-action--continue"
-              disabled={busy}
-              onClick={handleContinue}
-            >
-              продолжить
-            </button>
-            <button
-              className="result-action result-action--cancel"
-              disabled={busy}
-              onClick={handleCancel}
-            >
-              отменить
-            </button>
+
+            {operation === 'clarify' ? (
+              <>
+                <button className="result-action result-action--reply" disabled={busy} onClick={handleReply}>
+                  ответить
+                </button>
+                <button className="result-action result-action--continue-middle" disabled={busy} onClick={handleForceContinue}>
+                  продолжить
+                </button>
+                <button className="result-action result-action--cancel-right" disabled={busy} onClick={handleCancel}>
+                  отменить
+                </button>
+              </>
+            ) : (
+              <>
+                <button className="result-action result-action--continue" disabled={busy} onClick={handleContinue}>
+                  продолжить
+                </button>
+                <button className="result-action result-action--cancel" disabled={busy} onClick={handleCancel}>
+                  отменить
+                </button>
+              </>
+            )}
           </>
         )}
 
