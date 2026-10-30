@@ -26,8 +26,8 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
   if (!response.ok) {
     let detail = `Сервер ответил ошибкой ${response.status}`
     try {
-      const errData = (await response.json()) as { detail?: string }
-      if (errData?.detail) detail = errData.detail
+      const errData = (await response.json()) as { detail?: unknown }
+      if (typeof errData?.detail === 'string' && errData.detail) detail = errData.detail
     } catch {
       // игнорируем ошибку парсинга
     }

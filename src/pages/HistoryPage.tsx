@@ -4,6 +4,7 @@ import Logo from '../components/Logo'
 import crow from '../assets/crow-listening.png'
 import {
   deletePlan,
+  downloadCalendar,
   getPlans,
   listPlans,
   markDone,
@@ -49,7 +50,7 @@ export default function HistoryPage() {
 
   const [searchInput, setSearchInput] = useState(query)
   const [result, setResult] = useState<Loaded | null>(null)
-  const [reloads, setReloads] = useState(0) 
+  const [reloads, setReloads] = useState(0)
   const [editingId, setEditingId] = useState<number | null>(null)
   const [draft, setDraft] = useState<Draft>({ text: '', date: '', time: '', type: 'task' })
   const [actionFailed, setActionFailed] = useState(false)
@@ -155,6 +156,13 @@ export default function HistoryPage() {
             </select>
             <button type="submit" style={buttonStyle}>
               найти
+            </button>
+            <button
+              type="button"
+              style={buttonStyle}
+              onClick={() => void downloadCalendar().catch(() => setActionFailed(true))}
+            >
+              календарь
             </button>
             {isFiltered && (
               <button type="button" onClick={handleReset} style={buttonStyle}>

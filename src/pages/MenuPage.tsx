@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import Logo from '../components/Logo'
-import { cancelPending, recognizeSpeech, savePlan, sendText } from '../api/voice'
+import { acknowledgeTurn, cancelPending, recognizeSpeech, savePlan, type VoiceResponse } from '../api/voice'
 import { useVoiceRecorder } from '../hooks/useVoiceRecorder'
 import crow from '../assets/crow.png'
 import crowListening from '../assets/crow-listening.png'
@@ -22,6 +22,7 @@ function describeError(error: unknown): string {
     if (error.name === 'NotAllowedError') return 'Нет доступа к микрофону'
     if (error.name === 'NotFoundError') return 'Микрофон не найден'
   }
+  if (error instanceof Error && error.message) return error.message
   return 'Что-то пошло не так'
 }
 
@@ -37,6 +38,7 @@ export default function MenuPage() {
   const [mode, setMode] = useState<Mode>('idle')
   const [generatedText, setGeneratedText] = useState('')
   const [operation, setOperation] = useState('')
+  const [needsConfirm, setNeedsConfirm] = useState(false)
   const [errorText, setErrorText] = useState('')
   const [busy, setBusy] = useState(false)
   const { start, stop, cancel } = useVoiceRecorder()
@@ -45,6 +47,13 @@ export default function MenuPage() {
     cancel()
     setErrorText(describeError(error))
     setMode('error')
+  }
+
+  function showVoice(res: VoiceResponse) {
+    setGeneratedText(res.text)
+    setOperation(res.operation)
+    setNeedsConfirm(res.requiresConfirmation)
+    setMode('result')
   }
 
   async function handleHeadphones() {
@@ -56,10 +65,7 @@ export default function MenuPage() {
         setMode('listening')
       } else {
         const audio = await stop()
-        const res = await recognizeSpeech(audio)
-        setGeneratedText(res.text)
-        setOperation(res.operation)
-        setMode('result')
+        showVoice(await recognizeSpeech(audio))
       }
     } catch (error) {
       fail(error)
@@ -68,16 +74,13 @@ export default function MenuPage() {
     }
   }
 
-  async function handleContinue() {
+  async function handleSave() {
     if (busy) return
     setBusy(true)
     try {
-      if (operation === 'clarify') {
-        const res = await sendText('Оставь как есть, поставь время по умолчанию')
-        setGeneratedText(res.text)
-        setOperation(res.operation)
-      }
-      await savePlan()
+      const res = await savePlan()
+      setGeneratedText(res.text || 'Зафиксировано.')
+      setNeedsConfirm(false)
       setMode('saved')
     } catch (error) {
       fail(error)
@@ -100,11 +103,28 @@ export default function MenuPage() {
   }
 
   async function handleCancel() {
-    setMode('idle')
+    if (busy) return
+    setBusy(true)
     try {
-      await cancelPending()
-    } catch {
+      const res = await cancelPending()
+      setGeneratedText(res.text)
+      setNeedsConfirm(false)
+      setOperation('cancel')
+      setMode('saved')
+    } catch (error) {
+      fail(error)
+    } finally {
+      setBusy(false)
     }
+  }
+
+  async function handleDone() {
+    try {
+      await acknowledgeTurn()
+    } catch {
+      // экран всё равно можно закрыть
+    }
+    setMode('idle')
   }
 
   const isFinal = mode === 'saved' || mode === 'error'
@@ -146,17 +166,13 @@ export default function MenuPage() {
           </>
         )}
 
-        {mode === 'result' && (
+        {mode === 'result' && needsConfirm && (
           <>
             <div className="result-box" style={{ fontSize: getFontSize(generatedText) }}>
               {generatedText}
             </div>
 
-            <button
-              className="result-action result-action--reply"
-              disabled={busy}
-              onClick={handleContinue}
-            >
+            <button className="result-action result-action--reply" disabled={busy} onClick={handleSave}>
               сохранить
             </button>
             <button
@@ -176,10 +192,39 @@ export default function MenuPage() {
           </>
         )}
 
+        {mode === 'result' && !needsConfirm && operation === 'update' && (
+          <>
+            <div className="result-box" style={{ fontSize: getFontSize(generatedText) }}>
+              {generatedText}
+            </div>
+            <button className="result-action result-action--reply" disabled={busy} onClick={handleCancel}>
+              откатить
+            </button>
+            <button
+              className="result-action result-action--cancel-right"
+              disabled={busy}
+              onClick={handleDone}
+            >
+              готово
+            </button>
+          </>
+        )}
+
+        {mode === 'result' && !needsConfirm && operation !== 'update' && (
+          <>
+            <div className="result-box" style={{ fontSize: getFontSize(generatedText) }}>
+              {generatedText}
+            </div>
+            <button className="result-action result-action--home" disabled={busy} onClick={handleDone}>
+              на начало
+            </button>
+          </>
+        )}
+
         {isFinal && (
           <>
-            <div className="result-box result-box--saved">
-              {mode === 'saved' ? 'Запомнила...' : errorText}
+            <div className="result-box result-box--saved" style={{ fontSize: getFontSize(mode === 'saved' ? generatedText : errorText) }}>
+              {mode === 'saved' ? generatedText : errorText}
             </div>
             <button className="result-action result-action--home" onClick={() => setMode('idle')}>
               на начало

@@ -3,7 +3,8 @@
   left: calc(var(--u) * 16);
   top: calc(var(--u) * 440);
   width: calc(var(--u) * 733);
-  height: calc(var(--u) * 250);
+  height: auto;
+  min-height: calc(var(--u) * 250);
   box-sizing: border-box;
   border: calc(var(--u) * 6) solid var(--ink);
   background: var(--bg);
@@ -85,4 +86,11 @@
 
 .auth-switch:hover {
   color: var(--navy);
+}
+
+.auth-error {
+  font-size: calc(var(--u) * 11);
+  line-height: 1.45;
+  color: #c93b3b;
+  text-align: center;
 }

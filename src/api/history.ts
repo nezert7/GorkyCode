@@ -1,15 +1,15 @@
-import { request } from './client'
+import { apiUrl, request } from './client'
 
 export type PlanType = 'task' | 'meeting' | 'reminder'
 export type PlanStatus = 'pending' | 'done'
 
 export type Plan = {
   id: number
-  date: string 
-  time: string 
+  date: string
+  time: string
   text: string
   type: PlanType
-  createdAt: string 
+  createdAt: string
   status: PlanStatus
 }
 
@@ -48,8 +48,9 @@ export function toInputDate(date: string): string {
 }
 
 function formatTime(time: string): string {
-  const short = time.slice(0, 5)
-  return short === '00:00' ? '' : short
+  if (!time) return ''
+  const match = /^(\d{2}):(\d{2})/.exec(time)
+  return match ? `${match[1]}:${match[2]}` : time.slice(0, 5)
 }
 
 function fromServer(raw: ServerItem, index: number): Plan {
@@ -97,7 +98,7 @@ async function fetchPlans(path: string): Promise<Plan[]> {
 }
 
 export async function getPlans(): Promise<Plan[]> {
-  return fetchPlans('/api/history?limit=200&sort_by=created_desc')
+  return fetchPlans('/api/history?limit=500&sort_by=created_desc')
 }
 
 export async function listPlans(period: Period): Promise<Plan[]> {
@@ -105,18 +106,14 @@ export async function listPlans(period: Period): Promise<Plan[]> {
     start_date: period.from ?? '1900-01-01',
     end_date: period.to ?? '2999-12-31',
     sort_by: 'date',
+    status: 'all',
   })
   return fetchPlans(`/api/tasks?${params}`)
 }
 
 export async function searchPlans(query: string): Promise<Plan[]> {
-  const plans = await getPlans()
-  const words = query.toLowerCase().split(/\s+/).filter(Boolean)
-  if (words.length === 0) return plans
-  return plans.filter((plan) => {
-    const haystack = `${plan.text} ${plan.date} ${plan.time} ${planTypeLabels[plan.type]}`.toLowerCase()
-    return words.every((word) => haystack.includes(word))
-  })
+  const params = new URLSearchParams({ q: query, limit: '50' })
+  return fetchPlans(`/api/search?${params}`)
 }
 
 export async function markDone(id: number): Promise<void> {
@@ -125,8 +122,8 @@ export async function markDone(id: number): Promise<void> {
 
 export type PlanChanges = {
   text: string
-  date: string 
-  time: string 
+  date: string
+  time: string
   type: PlanType
 }
 
@@ -136,6 +133,12 @@ const serverIntent: Record<PlanType, string> = {
   reminder: 'Reminder',
 }
 
+function toServerClock(value: string): string | null {
+  if (!value) return null
+  const match = /^(\d{2}):(\d{2})/.exec(value)
+  return match ? `${match[1]}:${match[2]}` : null
+}
+
 export async function updatePlan(id: number, changes: PlanChanges): Promise<void> {
   await request<unknown>(`/api/tasks/${id}`, {
     method: 'PUT',
@@ -143,7 +146,7 @@ export async function updatePlan(id: number, changes: PlanChanges): Promise<void
     body: JSON.stringify({
       action: changes.text,
       parsed_date: changes.date || null,
-      parsed_time: changes.time || null,
+      parsed_time: toServerClock(changes.time),
       intent: serverIntent[changes.type],
     }),
   })
@@ -151,4 +154,25 @@ export async function updatePlan(id: number, changes: PlanChanges): Promise<void
 
 export async function deletePlan(id: number): Promise<void> {
   await request<unknown>(`/api/tasks/${id}`, { method: 'DELETE' })
+}
+
+export async function downloadCalendar(): Promise<void> {
+  const token = localStorage.getItem('vorona_token') || ''
+  const response = await fetch(apiUrl('/api/calendar.ics'), {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  })
+  if (response.status === 401) {
+    localStorage.removeItem('vorona_token')
+    localStorage.removeItem('vorona_username')
+    if (!window.location.hash.endsWith('#/')) window.location.hash = '#/'
+    throw new Error('Необходима авторизация')
+  }
+  if (!response.ok) throw new Error('Не удалось скачать календарь')
+  const blob = await response.blob()
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = 'vorona.ics'
+  link.click()
+  URL.revokeObjectURL(url)
 }

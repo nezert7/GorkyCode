@@ -6,18 +6,33 @@ import crow from '../assets/crow.png'
 import './pages.css'
 import './auth.css'
 
+function checkPassword(password: string, login: string): string | null {
+  const issues: string[] = []
+  if (password.length < 8) issues.push(`минимум 8 символов (сейчас ${password.length})`)
+  if (password.includes(' ')) issues.push('уберите пробелы')
+  if (!/[A-ZА-ЯЁ]/.test(password)) issues.push('добавьте заглавную букву')
+  if (!/[a-zа-яё]/.test(password)) issues.push('добавьте строчную букву')
+  if (!/\d/.test(password)) issues.push('добавьте цифру')
+  if (!/[!@#$%^&*()_+\-=[\]{};:'",.<>/?\\|`~]/.test(password)) {
+    issues.push('добавьте спецсимвол (!@#$% и т.д.)')
+  }
+  if (login && password.toLowerCase() === login.trim().toLowerCase()) {
+    issues.push('пароль не должен совпадать с логином')
+  }
+  return issues.length ? `Исправьте пароль: ${issues.join(', ')}` : null
+}
+
 export default function AuthPage() {
   const [isLogin, setIsLogin] = useState(true)
   const [login, setLogin] = useState('')
   const [password, setPassword] = useState('')
-  const [errors, setErrors] = useState<{ login?: string; password?: string }>({})
+  const [errors, setErrors] = useState<{ login?: string; password?: string; form?: string }>({})
   const [busy, setBusy] = useState(false)
 
   const loginRef = useRef<HTMLInputElement>(null)
   const passRef = useRef<HTMLInputElement>(null)
   const navigate = useNavigate()
 
-  // Если токен уже сохранён и валиден — сразу переходим на /start
   useEffect(() => {
     const token = localStorage.getItem('vorona_token')
     if (!token) return
@@ -52,10 +67,10 @@ export default function AuthPage() {
     setErrors({})
 
     const cleanLogin = login.trim()
-    const newErrors: { login?: string; password?: string } = {}
+    const cleanPassword = password.trim()
+    const newErrors: { login?: string; password?: string; form?: string } = {}
     let hasError = false
 
-    // Валидация под требования main_2.py
     if (!cleanLogin) {
       newErrors.login = 'Неверный формат (пустая строка)'
       hasError = true
@@ -64,18 +79,22 @@ export default function AuthPage() {
       hasError = true
     }
 
-    if (!password.trim()) {
+    if (!cleanPassword) {
       newErrors.password = 'Неверный формат'
       hasError = true
-    } else if (!isLogin && password.trim().length < 4) {
-      newErrors.password = 'Минимум 4 символа'
-      hasError = true
+    } else if (!isLogin) {
+      const passwordMessage = checkPassword(cleanPassword, cleanLogin)
+      if (passwordMessage) {
+        newErrors.password = 'Слабый пароль'
+        newErrors.form = passwordMessage
+        hasError = true
+      }
     }
 
     if (hasError) {
       setErrors(newErrors)
       if (newErrors.login) setLogin('')
-      if (newErrors.password) setPassword('')
+      if (newErrors.password && !newErrors.form) setPassword('')
       return
     }
 
@@ -85,7 +104,7 @@ export default function AuthPage() {
       const res = await fetch(apiUrl(endpoint), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: cleanLogin, password: password.trim() }),
+        body: JSON.stringify({ username: cleanLogin, password: cleanPassword }),
       })
 
       const data = (await res.json().catch(() => ({}))) as {
@@ -95,21 +114,18 @@ export default function AuthPage() {
       }
 
       if (!res.ok) {
+        const detail = data.detail || 'Ошибка авторизации'
         if (res.status === 409) {
-          setErrors({ login: 'Такой логин уже существует' })
+          setErrors({ login: 'Такой логин уже существует', form: detail })
           setLogin('')
         } else if (res.status === 401) {
-          setErrors({ password: 'Неверный пароль' })
+          setErrors({ password: detail, form: detail })
           setPassword('')
+        } else if (detail.toLowerCase().includes('логин')) {
+          setErrors({ login: detail, form: detail })
+          setLogin('')
         } else {
-          const detail = data.detail || 'Неверный формат'
-          if (detail.toLowerCase().includes('логин')) {
-            setErrors({ login: detail })
-            setLogin('')
-          } else {
-            setErrors({ password: detail })
-            setPassword('')
-          }
+          setErrors({ password: 'Исправьте пароль', form: detail })
         }
         return
       }
@@ -174,6 +190,8 @@ export default function AuthPage() {
                 className={errors.password ? 'input-error' : ''}
               />
             </div>
+
+            {errors.form && <p className="auth-error">{errors.form}</p>}
 
             <button type="submit" disabled={busy} className="auth-submit">
               {isLogin ? 'Войти' : 'Зарегистрироваться'}

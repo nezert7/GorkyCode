@@ -4,13 +4,12 @@ import AuthPage from './pages/AuthPage'
 import StartPage from './pages/StartPage'
 import MenuPage from './pages/MenuPage'
 import HistoryPage from './pages/HistoryPage'
-import { useReminders } from './hooks/useReminders'
+import { Reminders } from './hooks/useReminders'
 
 export default function App() {
-  useReminders()
-
   return (
     <HashRouter>
+      <Reminders />
       <Routes>
         <Route path="/" element={<AuthPage />} />
         <Route path="/start" element={<StartPage />} />
