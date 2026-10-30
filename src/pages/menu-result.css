@@ -41,21 +41,22 @@
   top: calc(var(--u) * 760);
 }
 
-
 .result-action--reply {
-  left: calc(var(--u) * 72);
+  left: calc(var(--u) * 64);
   top: calc(var(--u) * 699);
-  font-size: calc(var(--u) * 24);
+  font-size: calc(var(--u) * 22);
 }
+
 
 .result-action--continue-middle {
   left: calc(var(--u) * 318);
   top: calc(var(--u) * 699);
-  font-size: calc(var(--u) * 24);
+  font-size: calc(var(--u) * 22);
 }
 
+
 .result-action--cancel-right {
-  left: calc(var(--u) * 588);
+  left: calc(var(--u) * 580);
   top: calc(var(--u) * 699);
-  font-size: calc(var(--u) * 24);
+  font-size: calc(var(--u) * 22);
 }
