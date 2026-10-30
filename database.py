@@ -1031,19 +1031,25 @@ class DatabaseManager:
             return [dict(r) for r in rows]
 
     def mark_done(self, task_id: int, user_id: int = 1) -> bool:
+        """Переключает статус задачи: Active -> Done, а при повторном нажатии Done -> Active."""
         item = self.get_item_by_id(task_id, user_id=user_id)
         if not item:
             return False
 
+        new_status = "Active" if item.get("status") == "Done" else "Done"
+
         with self._get_conn() as conn:
             cur = conn.execute(
-                "UPDATE tasks SET status = 'Done' WHERE id = ? AND user_id = ?",
-                (task_id, user_id)
+                "UPDATE tasks SET status = ? WHERE id = ? AND user_id = ?",
+                (new_status, task_id, user_id)
             )
             conn.commit()
             ok = cur.rowcount > 0
 
         if ok and self._is_real_db():
+            if new_status == "Active" and item.get("parsed_date"):
+                CalendarIntegration.remove_event_from_os_calendar(item)
+                CalendarIntegration.sync_event_to_os_calendar(item)
             CalendarIntegration.export_all_to_ics(self.get_history(limit=200, user_id=user_id))
         return ok
 

@@ -9,7 +9,7 @@ DTSTART:20261030T190000
 DTEND:20261030T200000
 SUMMARY:[Напоминание] Сходить в зал
 DESCRIPTION:Создано голосовым ассистентом Ворона (Поставь напоминания в 7 часов вечера сходить в зол.. Сегодня) [VORONA_ID:2]
-STATUS:COMPLETED
+STATUS:CONFIRMED
 BEGIN:VALARM
 TRIGGER:-PT60M
 ACTION:DISPLAY

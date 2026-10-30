@@ -8,7 +8,7 @@ TARGET_JS_NAME = "index-DfO6stMJ.js"
 JS_PATH = os.path.join(ASSETS_DIR, TARGET_JS_NAME)
 BAK_PATH = JS_PATH + ".bak"
 
-# Точный фрагмент из нового файла index-DfO6stMJ.js
+# 1. Блок авторизации и запросов из index-DfO6stMJ.js
 OLD_AUTH_AND_FETCH = (
     'function Wn(){let[e,t]=(0,_.useState)(!0),[n,r]=(0,_.useState)(``),[i,a]=(0,_.useState)(``),[o,s]=(0,_.useState)({}),c=vt();'
     'function l(e){e.preventDefault(),s({});let t=!1,o={};n.trim()||(o.login=`Неверный формат (пустая строка)`,t=!0),i.trim()||(o.password=`Неверный формат`,t=!0),n.trim()===`admin`&&i.trim()===`wrong`&&(o.global=`Ошибка авторизации`,t=!0),t?(s(o),n.trim()||r(``),i.trim()||a(``)):c(`/start`)}'
@@ -135,12 +135,22 @@ async function Jn(e,t={}){
   return Yn(i),i;
 }"""
 
+# 2. Делаем кнопку галочки (✓) активной всегда, чтобы повторный клик возвращал задачу в невыполненные
+OLD_DONE_BTN = (
+    '(0,M.jsx)(`button`,{type:`button`,title:`Отметить выполненной`,'
+    'disabled:t,onClick:()=>void C(()=>_r(e.id)),style:{...wr,opacity:t?.4:1},children:`✓`})'
+)
+
+NEW_DONE_BTN = (
+    '(0,M.jsx)(`button`,{type:`button`,title:t?`Вернуть в невыполненные`:`Отметить выполненной`,'
+    'onClick:()=>void C(()=>_r(e.id)),style:{...wr,background:t?`#e6f4ea`:`#fff`},children:`✓`})'
+)
+
 OLD_NOTIF_POLL = "async function Dr(){return(await Jn(`/api/notifications`))?.notifications??[]}"
 NEW_NOTIF_POLL = "async function Dr(){if(!localStorage.getItem(`vorona_token`))return[];return(await Jn(`/api/notifications`))?.notifications??[]}"
 
 
 def sync_index_html_script_tag():
-    """Обновляет ссылку на index-DfO6stMJ.js внутри static_frontend/index.html, если там старый хеш."""
     if not os.path.exists(INDEX_HTML_PATH):
         return
     with open(INDEX_HTML_PATH, "r", encoding="utf-8") as f:
@@ -155,7 +165,6 @@ def sync_index_html_script_tag():
 def main():
     if not os.path.exists(JS_PATH):
         print(f"❌ Файл не найден: {JS_PATH}")
-        print("Положите index-DfO6stMJ.js в папку static_frontend/assets/")
         return
 
     sync_index_html_script_tag()
@@ -169,17 +178,14 @@ def main():
     if OLD_AUTH_AND_FETCH in content and not os.path.exists(BAK_PATH):
         shutil.copyfile(JS_PATH, BAK_PATH)
 
-    if OLD_AUTH_AND_FETCH not in content:
-        print("ℹ️ Файл уже пропатчен или имеет другую структуру.")
-        return
-
     content = content.replace(OLD_AUTH_AND_FETCH, NEW_AUTH_AND_FETCH)
+    content = content.replace(OLD_DONE_BTN, NEW_DONE_BTN)
     content = content.replace(OLD_NOTIF_POLL, NEW_NOTIF_POLL)
 
     with open(JS_PATH, "w", encoding="utf-8") as f:
         f.write(content)
 
-    print("✅ Новый файл index-DfO6stMJ.js успешно адаптирован (авторизация + сброс ошибок по клику)!")
+    print("✅ Готово! Повторное нажатие на галочку (✓) теперь возвращает задачу обратно в невыполненные.")
 
 
 if __name__ == "__main__":
