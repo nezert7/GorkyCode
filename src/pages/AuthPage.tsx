@@ -1,42 +1,75 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import Logo from '../components/Logo'
+import { apiUrl } from '../api/client'
 import crow from '../assets/crow.png'
 import './pages.css'
 import './auth.css'
 
 export default function AuthPage() {
-
   const [isLogin, setIsLogin] = useState(true)
   const [login, setLogin] = useState('')
   const [password, setPassword] = useState('')
   const [errors, setErrors] = useState<{ login?: string; password?: string }>({})
-  
+  const [busy, setBusy] = useState(false)
+
+  const loginRef = useRef<HTMLInputElement>(null)
+  const passRef = useRef<HTMLInputElement>(null)
   const navigate = useNavigate()
 
-  function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    setErrors({})
-    let hasError = false
-    const newErrors: { login?: string; password?: string } = {}
+  // Если токен уже сохранён и валиден — сразу переходим на /start
+  useEffect(() => {
+    const token = localStorage.getItem('vorona_token')
+    if (!token) return
 
-    if (!login.trim()) {
+    fetch(apiUrl('/api/auth/me'), {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((res) => {
+        if (res.ok) {
+          navigate('/start')
+        } else {
+          localStorage.removeItem('vorona_token')
+          localStorage.removeItem('vorona_username')
+        }
+      })
+      .catch(() => {})
+  }, [navigate])
+
+  function clearFieldError(field: 'login' | 'password') {
+    if (errors.login || errors.password) {
+      setErrors({})
+    }
+    setTimeout(() => {
+      if (field === 'login') loginRef.current?.focus()
+      else passRef.current?.focus()
+    }, 0)
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    if (busy) return
+    setErrors({})
+
+    const cleanLogin = login.trim()
+    const newErrors: { login?: string; password?: string } = {}
+    let hasError = false
+
+    // Валидация под требования main_2.py
+    if (!cleanLogin) {
       newErrors.login = 'Неверный формат (пустая строка)'
       hasError = true
+    } else if (cleanLogin.length < 2) {
+      newErrors.login = 'Минимум 2 символа'
+      hasError = true
     }
+
     if (!password.trim()) {
       newErrors.password = 'Неверный формат'
       hasError = true
-    }
-
-    if (!hasError) {
-      if (isLogin && password === 'wrong') {
-        newErrors.password = 'Неверный пароль'
-        hasError = true
-      } else if (!isLogin && login.trim() === 'admin') {
-        newErrors.login = 'Такой логин уже существует'
-        hasError = true
-      }
+    } else if (!isLogin && password.trim().length < 4) {
+      newErrors.password = 'Минимум 4 символа'
+      hasError = true
     }
 
     if (hasError) {
@@ -46,7 +79,52 @@ export default function AuthPage() {
       return
     }
 
-    navigate('/start')
+    setBusy(true)
+    try {
+      const endpoint = isLogin ? '/api/auth/login' : '/api/auth/register'
+      const res = await fetch(apiUrl(endpoint), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: cleanLogin, password: password.trim() }),
+      })
+
+      const data = (await res.json().catch(() => ({}))) as {
+        token?: string
+        user?: { username?: string }
+        detail?: string
+      }
+
+      if (!res.ok) {
+        if (res.status === 409) {
+          setErrors({ login: 'Такой логин уже существует' })
+          setLogin('')
+        } else if (res.status === 401) {
+          setErrors({ password: 'Неверный пароль' })
+          setPassword('')
+        } else {
+          const detail = data.detail || 'Неверный формат'
+          if (detail.toLowerCase().includes('логин')) {
+            setErrors({ login: detail })
+            setLogin('')
+          } else {
+            setErrors({ password: detail })
+            setPassword('')
+          }
+        }
+        return
+      }
+
+      if (data.token) {
+        localStorage.setItem('vorona_token', data.token)
+        localStorage.setItem('vorona_username', data.user?.username || cleanLogin)
+      }
+      navigate('/start')
+    } catch {
+      setErrors({ password: 'Сервер недоступен' })
+      setPassword('')
+    } finally {
+      setBusy(false)
+    }
   }
 
   function toggleMode() {
@@ -63,31 +141,41 @@ export default function AuthPage() {
 
         <div className="auth-box">
           <h2 className="auth-title">{isLogin ? 'Авторизация' : 'Регистрация'}</h2>
-          
+
           <form onSubmit={handleSubmit} className="auth-form">
-            <div className="auth-row">
+            <div className="auth-row" onMouseDown={() => clearFieldError('login')}>
               <label>Логин:</label>
               <input
+                ref={loginRef}
                 type="text"
                 value={login}
-                onChange={(e) => setLogin(e.target.value)}
+                onFocus={() => errors.login && setErrors({ ...errors, login: undefined })}
+                onChange={(e) => {
+                  if (errors.login) setErrors({ ...errors, login: undefined })
+                  setLogin(e.target.value)
+                }}
                 placeholder={errors.login || ''}
                 className={errors.login ? 'input-error' : ''}
               />
             </div>
-            
-            <div className="auth-row">
+
+            <div className="auth-row" onMouseDown={() => clearFieldError('password')}>
               <label>Пароль:</label>
               <input
+                ref={passRef}
                 type="password"
                 value={password}
-                onChange={(e) => setPassword(e.target.value)}
+                onFocus={() => errors.password && setErrors({ ...errors, password: undefined })}
+                onChange={(e) => {
+                  if (errors.password) setErrors({ ...errors, password: undefined })
+                  setPassword(e.target.value)
+                }}
                 placeholder={errors.password || ''}
                 className={errors.password ? 'input-error' : ''}
               />
             </div>
-            
-            <button type="submit" className="auth-submit">
+
+            <button type="submit" disabled={busy} className="auth-submit">
               {isLogin ? 'Войти' : 'Зарегистрироваться'}
             </button>
           </form>

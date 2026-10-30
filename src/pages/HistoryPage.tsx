@@ -102,7 +102,7 @@ export default function HistoryPage() {
     setSearchInput('')
     setSearchParams({})
   }
-  
+
   async function runAction(action: () => Promise<void>): Promise<boolean> {
     try {
       await action()
@@ -240,10 +240,9 @@ export default function HistoryPage() {
                       </span>
                       <button
                         type="button"
-                        title="Отметить выполненной"
-                        disabled={done}
+                        title={done ? 'Вернуть в невыполненные' : 'Отметить выполненной'}
                         onClick={() => void runAction(() => markDone(plan.id))}
-                        style={{ ...smallButtonStyle, opacity: done ? 0.4 : 1 }}
+                        style={{ ...smallButtonStyle, background: done ? '#e6f4ea' : '#fff' }}
                       >
                         ✓
                       </button>
