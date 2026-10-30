@@ -20,12 +20,16 @@ if sys.platform == "darwin":
         ):
             decision_handler(1)
 
-        cocoa.UIWebUIDelegate.webView_requestMediaCapturePermissionForOrigin_initiatedByFrame_type_decisionHandler_ = (
-            webView_requestMediaCapturePermissionForOrigin_initiatedByFrame_type_decisionHandler_
+        delegate_cls = getattr(cocoa, "UIWebUIDelegate", None) or getattr(
+            getattr(cocoa, "BrowserView", None), "UIDelegate", None
         )
-        print("[*] WebKit: доступ к микрофону успешно разрешён.")
-    except Exception as e:
-        print(f"[*] WebKit mic patch info: {e}")
+        if delegate_cls is not None:
+            delegate_cls.webView_requestMediaCapturePermissionForOrigin_initiatedByFrame_type_decisionHandler_ = (
+                webView_requestMediaCapturePermissionForOrigin_initiatedByFrame_type_decisionHandler_
+            )
+            print("[*] WebKit: доступ к микрофону автоматически разрешён.")
+    except Exception:
+        pass
 
 
 def run_server():
