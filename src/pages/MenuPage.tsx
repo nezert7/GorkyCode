@@ -35,18 +35,33 @@ function getFontSize(text: string): string {
 }
 
 const actionsRowStyle: CSSProperties = {
-  position: 'absolute',
-  left: 'calc(var(--u) * 72)',
   top: 'calc(var(--u) * 699)',
-  width: 'calc(var(--u) * 655)',
+  height: 'auto',
+  minHeight: 0,
+  border: 'none',
+  background: 'transparent',
+  padding: 0,
   display: 'flex',
+  flexDirection: 'row',
   justifyContent: 'space-between',
   alignItems: 'center',
+}
+
+const singleActionRowStyle: CSSProperties = {
+  ...actionsRowStyle,
+  justifyContent: 'center',
+}
+
+const historyRowStyle: CSSProperties = {
+  ...actionsRowStyle,
+  top: 'calc(var(--u) * 748)',
+  justifyContent: 'center',
 }
 
 const inlineActionBtnStyle: CSSProperties = {
   position: 'static',
   fontSize: 'calc(var(--u) * 24)',
+  margin: 0,
 }
 
 export default function MenuPage() {
@@ -186,7 +201,7 @@ export default function MenuPage() {
               {generatedText}
             </div>
 
-            <div style={actionsRowStyle}>
+            <div className="result-box" style={actionsRowStyle}>
               <button
                 className="result-action"
                 style={inlineActionBtnStyle}
@@ -221,7 +236,7 @@ export default function MenuPage() {
               {generatedText}
             </div>
 
-            <div style={actionsRowStyle}>
+            <div className="result-box" style={actionsRowStyle}>
               <button
                 className="result-action"
                 style={inlineActionBtnStyle}
@@ -247,9 +262,16 @@ export default function MenuPage() {
             <div className="result-box" style={{ fontSize: getFontSize(generatedText) }}>
               {generatedText}
             </div>
-            <button className="result-action result-action--home" disabled={busy} onClick={handleDone}>
-              на начало
-            </button>
+            <div className="result-box" style={singleActionRowStyle}>
+              <button
+                className="result-action"
+                style={inlineActionBtnStyle}
+                disabled={busy}
+                onClick={handleDone}
+              >
+                на начало
+              </button>
+            </div>
           </>
         )}
 
@@ -261,16 +283,30 @@ export default function MenuPage() {
             >
               {mode === 'saved' ? generatedText : errorText}
             </div>
-            <button className="result-action result-action--home" onClick={() => setMode('idle')}>
-              на начало
-            </button>
+            <div className="result-box" style={singleActionRowStyle}>
+              <button
+                className="result-action"
+                style={inlineActionBtnStyle}
+                onClick={() => setMode('idle')}
+              >
+                на начало
+              </button>
+            </div>
           </>
         )}
 
         {mode !== 'listening' && (
-          <Link to="/history" className={historyClass}>
-            сохранённые запросы
-          </Link>
+          mode === 'result' || isFinal ? (
+            <div className="result-box" style={historyRowStyle}>
+              <Link to="/history" className={historyClass} style={{ position: 'static' }}>
+                сохранённые запросы
+              </Link>
+            </div>
+          ) : (
+            <Link to="/history" className={historyClass}>
+              сохранённые запросы
+            </Link>
+          )
         )}
 
         <img src={crowByMode[mode]} alt="" className={crowClass} />
