@@ -180,7 +180,7 @@ export default function MenuPage() {
               disabled={busy}
               onClick={handleReply}
             >
-              продолжить
+              изменить
             </button>
             <button
               className="result-action result-action--cancel-right"
