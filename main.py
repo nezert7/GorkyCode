@@ -1,6 +1,5 @@
 import os
 import time
-import inspect
 import asyncio
 import threading
 from typing import Optional, Dict, Any, List
@@ -10,7 +9,13 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from auth import hash_password, verify_password, create_access_token, get_current_user
+from auth import (
+    hash_password,
+    verify_password,
+    validate_password_strength,
+    create_access_token,
+    get_current_user,
+)
 from database import CalendarIntegration, get_intent_label_ru
 from prompts_and_memory import MemoryManager
 from voice_service import VoiceService
@@ -28,7 +33,6 @@ app.add_middleware(
 
 voice_service = VoiceService()
 
-# Хранилища в ОЗУ (без создания файлов на диске)
 _user_memories: Dict[int, MemoryManager] = {}
 _pending_ui_notifications: Dict[int, List[Dict[str, Any]]] = {}
 
@@ -39,30 +43,21 @@ def get_user_memory(user_id: int) -> MemoryManager:
     return _user_memories[user_id]
 
 
-def _call_with_optional_user_id(func, *args, user_id: int = 1, **kwargs):
-    """Безопасный вызов: передаёт user_id, если функция его поддерживает."""
-    sig = inspect.signature(func)
-    if "user_id" in sig.parameters:
-        kwargs["user_id"] = user_id
-    return func(*args, **kwargs)
-
-
 def _background_notification_worker():
     """Фоновый поток в ОЗУ: каждые 30 сек проверяет задачи за 1 час до начала."""
     while True:
         try:
             agent = get_shared_agent()
-            if hasattr(agent.db, "check_and_trigger_upcoming_notifications"):
-                due_items = agent.db.check_and_trigger_upcoming_notifications()
-                for item in due_items:
-                    uid = int(item.get("user_id") or 1)
-                    kind = get_intent_label_ru(item.get("intent"))
-                    msg = f"Напоминание за час! {kind}: «{item.get('action')}» в {item.get('parsed_time')}."
-                    _pending_ui_notifications.setdefault(uid, []).append({
-                        "id": item.get("id"),
-                        "message": msg,
-                        "item": item
-                    })
+            due_items = agent.db.check_and_trigger_upcoming_notifications()
+            for item in due_items:
+                uid = int(item.get("user_id") or 1)
+                kind = get_intent_label_ru(item.get("intent"))
+                msg = f"Напоминание за час! {kind}: «{item.get('action')}» в {item.get('parsed_time')}."
+                _pending_ui_notifications.setdefault(uid, []).append({
+                    "id": item.get("id"),
+                    "message": msg,
+                    "item": item
+                })
         except Exception:
             pass
         time.sleep(30)
@@ -118,12 +113,14 @@ class TextQueryResponse(BaseModel):
 @app.post("/api/auth/register", response_model=AuthResponse)
 async def register_endpoint(req: AuthRequest):
     username = req.username.strip()
-    password = req.password.strip()
+    password = req.password
 
     if len(username) < 2:
         raise HTTPException(status_code=400, detail="Логин должен содержать минимум 2 символа")
-    if len(password) < 4:
-        raise HTTPException(status_code=400, detail="Пароль должен содержать минимум 4 символа")
+
+    pwd_error = validate_password_strength(password, username)
+    if pwd_error:
+        raise HTTPException(status_code=400, detail=pwd_error)
 
     agent = get_shared_agent()
     if agent.db.get_user_by_username(username):
@@ -140,7 +137,7 @@ async def register_endpoint(req: AuthRequest):
 @app.post("/api/auth/login", response_model=AuthResponse)
 async def login_endpoint(req: AuthRequest):
     username = req.username.strip()
-    password = req.password.strip()
+    password = req.password
 
     agent = get_shared_agent()
     user_row = agent.db.get_user_by_username(username)
@@ -162,8 +159,7 @@ async def _build_response_with_tts(turn_result: Dict[str, Any], user_id: int) ->
     spoken_text = turn_result.get("spoken_response") or format_spoken_response(turn_result)
     audio_key = f"reply_u{user_id}.mp3"
 
-    # Сохраняет MP3-байты в словарь ОЗУ (voice_service.memory_audio), на диск ничего не пишется
-    saved_key = await voice_service.text_to_speech_file(spoken_text, audio_key)
+    saved_key = await voice_service.text_to_speech_in_memory(spoken_text, audio_key)
     audio_url = f"/api/audio/{saved_key}" if saved_key else None
 
     return TextQueryResponse(
@@ -197,9 +193,7 @@ async def chat_endpoint(
     if user_text:
         mem.add_message("user", user_text)
 
-    # Выполняем ход агента в отдельном потоке, не блокируя FastAPI
     turn_result = await asyncio.to_thread(
-        _call_with_optional_user_id,
         run_agent_turn,
         user_query=user_text,
         history=mem.get_messages(),
@@ -219,13 +213,11 @@ async def voice_chat_endpoint(
     file: UploadFile = File(...),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
-    # Читаем аудиопоток сразу в ОЗУ — никаких временных файлов на диске!
     audio_bytes = await file.read()
 
     user_text, duration_sec = await asyncio.to_thread(
         voice_service.transcribe_audio_bytes,
-        audio_bytes,
-        file.filename or "record.webm"
+        audio_bytes
     )
 
     return await chat_endpoint(
@@ -246,7 +238,6 @@ async def confirm_pending_endpoint(
     user_id = int(current_user["id"])
     agent = get_shared_agent()
     res = await asyncio.to_thread(
-        _call_with_optional_user_id,
         agent.confirm_pending,
         session_id=req.session_id,
         user_id=user_id
@@ -264,7 +255,6 @@ async def cancel_pending_endpoint(
     user_id = int(current_user["id"])
     agent = get_shared_agent()
     res = await asyncio.to_thread(
-        _call_with_optional_user_id,
         agent.cancel_pending,
         session_id=req.session_id,
         user_id=user_id
@@ -276,7 +266,6 @@ async def cancel_pending_endpoint(
 
 @app.get("/api/audio/{filename}")
 async def get_audio_from_ram(filename: str):
-    """Отдаёт MP3-поток напрямую из оперативной памяти."""
     mp3_bytes = voice_service.get_cached_audio(filename)
     if mp3_bytes:
         return Response(
@@ -299,9 +288,7 @@ async def get_history_endpoint(
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     user_id = int(current_user["id"])
-    agent = get_shared_agent()
-    items = _call_with_optional_user_id(
-        agent.db.get_history,
+    items = get_shared_agent().db.get_history(
         limit=limit,
         offset=offset,
         intent_filter=intent,
@@ -321,9 +308,7 @@ async def get_tasks_by_period_endpoint(
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     user_id = int(current_user["id"])
-    agent = get_shared_agent()
-    items = _call_with_optional_user_id(
-        agent.db.get_items_by_period,
+    items = get_shared_agent().db.get_items_by_period(
         start_date,
         end_date or start_date,
         intent,
@@ -340,9 +325,7 @@ async def update_task_endpoint(
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     user_id = int(current_user["id"])
-    agent = get_shared_agent()
-    updated = _call_with_optional_user_id(
-        agent.db.update_item,
+    updated = get_shared_agent().db.update_item(
         task_id=task_id,
         action=req.action,
         parsed_date=req.parsed_date,
@@ -362,8 +345,7 @@ async def mark_task_done_endpoint(
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     user_id = int(current_user["id"])
-    agent = get_shared_agent()
-    ok = _call_with_optional_user_id(agent.db.mark_done, task_id, user_id=user_id)
+    ok = get_shared_agent().db.mark_done(task_id, user_id=user_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Task not found")
     return {"status": "ok", "task_id": task_id}
@@ -375,8 +357,7 @@ async def delete_task_endpoint(
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     user_id = int(current_user["id"])
-    agent = get_shared_agent()
-    ok = _call_with_optional_user_id(agent.db.delete_item, task_id, user_id=user_id)
+    ok = get_shared_agent().db.delete_item(task_id, user_id=user_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Task not found")
     return {"status": "deleted", "task_id": task_id}
@@ -393,10 +374,8 @@ async def pop_upcoming_notifications(current_user: Dict[str, Any] = Depends(get_
 
 @app.get("/api/calendar.ics")
 async def export_ics_calendar(current_user: Dict[str, Any] = Depends(get_current_user)):
-    """Генерирует и отдаёт .ics календарь из памяти без сохранения на диск."""
     user_id = int(current_user["id"])
-    agent = get_shared_agent()
-    items = _call_with_optional_user_id(agent.db.get_history, limit=200, user_id=user_id)
+    items = get_shared_agent().db.get_history(limit=500, user_id=user_id)
     ics_text = CalendarIntegration.export_all_to_ics(items)
     return Response(
         content=ics_text,
@@ -409,7 +388,7 @@ async def export_ics_calendar(current_user: Dict[str, Any] = Depends(get_current
 async def clear_history(current_user: Dict[str, Any] = Depends(get_current_user)):
     user_id = int(current_user["id"])
     get_user_memory(user_id).clear()
-    _call_with_optional_user_id(get_shared_agent().cancel_pending, "default", user_id=user_id)
+    get_shared_agent().cancel_pending("default", user_id=user_id)
     return {"status": "ok", "message": "History cleared"}
 
 

@@ -332,11 +332,9 @@ class RegexFallbackParser:
         return clean[0].upper() + clean[1:]
 
     @classmethod
-    def parse(cls, text: str, now: datetime) -> Optional[Dict[str, Any]]:
+    def parse_standalone_command(cls, text: str, now: datetime) -> Optional[Dict[str, Any]]:
+        """Проверяет, является ли фраза самостоятельной командой (update, delete, complete, search, list_period)."""
         clean = text.strip()
-        if len(clean) < 2:
-            return None
-
         lower_text = clean.lower()
 
         if VoiceUpdateExtractor.is_update_command(clean):
@@ -423,6 +421,19 @@ class RegexFallbackParser:
                 "search_query": None
             }
 
+        return None
+
+    @classmethod
+    def parse(cls, text: str, now: datetime) -> Optional[Dict[str, Any]]:
+        clean = text.strip()
+        if len(clean) < 2:
+            return None
+
+        standalone = cls.parse_standalone_command(clean, now)
+        if standalone:
+            return standalone
+
+        lower_text = clean.lower()
         intent = cls.detect_intent(lower_text)
         parsed_date, parsed_time, _ = RussianDateTimeExtractor.extract_date_and_time(clean, now)
         action = cls.clean_action_text(clean, now)
@@ -444,7 +455,7 @@ class RegexFallbackParser:
 
 
 class GigaChatClient:
-    """Прямой легковесный клиент GigaChat API поверх httpx (без прослойки пакета openai)."""
+    """Прямой легковесный клиент GigaChat API поверх httpx."""
 
     OAUTH_URL = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
     CHAT_URL = "https://gigachat.devices.sberbank.ru/api/v1/chat/completions"
@@ -523,9 +534,7 @@ class GigaChatClient:
 
 
 class VoronaAgentCore:
-    """
-    Ядро голосового ассистента «Ворона» (только GigaChat + RegEx, работа в ОЗУ без лог-файлов).
-    """
+    """Ядро голосового ассистента «Ворона» (только GigaChat + RegEx, работа в ОЗУ)."""
 
     def __init__(self, db: DatabaseManager, **_kwargs):
         self.db = db
@@ -540,7 +549,6 @@ class VoronaAgentCore:
 
         self.pending_buffer: Dict[str, Dict[str, Any]] = {}
         self.rollback_buffer: Dict[str, Dict[str, Any]] = {}
-        self.clarification_buffer: Dict[str, Dict[str, Any]] = {}
         self.fail_streak: Dict[str, int] = {}
 
     @staticmethod
@@ -688,6 +696,11 @@ class VoronaAgentCore:
                     "time": final_time
                 }
             }
+
+        # Если новая реплика — это явная самостоятельная команда (удали, перенеси, найди, что у меня),
+        # сбрасываем незаконченный черновик, чтобы не склеивать их друг с другом
+        if RegexFallbackParser.parse_standalone_command(clean_input, now) is not None:
+            self.pending_buffer.pop(session_key, None)
 
         prev_staged = self.pending_buffer.get(session_key)
         if prev_staged:
@@ -949,7 +962,6 @@ class VoronaAgentCore:
     def cancel_pending(self, session_id: str = "default", user_id: int = 1) -> Dict[str, Any]:
         session_key = self._make_session_key(user_id, session_id)
         self.pending_buffer.pop(session_key, None)
-        self.clarification_buffer.pop(session_key, None)
 
         prev_state = self.rollback_buffer.pop(session_key, None)
         if prev_state:
@@ -1032,7 +1044,7 @@ def format_spoken_response(result: Dict[str, Any]) -> str:
             parts.append(f"на {format_date_ru(data['date'])}")
         if data.get("time"):
             parts.append(f"в {data['time']}")
-        spoken = " ".join(parts) + "."
+        spoken = ", ".join(parts) + "."
 
         if data.get("date_in_past") == 1:
             spoken += " Эта дата уже в прошлом."
@@ -1046,8 +1058,10 @@ def format_spoken_response(result: Dict[str, Any]) -> str:
     if ui_status == "Зафиксировано":
         saved = result.get("saved") or {}
         kind = get_intent_label_ru(saved.get("intent"))
-        cal_note = " и добавлена в Календарь" if saved.get("parsed_date") else ""
-        return f"Зафиксировано! {kind} «{saved.get('action', '')}» сохранена{cal_note}."
+        d_str = format_date_ru(saved.get("parsed_date"))
+        t_str = saved.get("parsed_time") or ""
+        when_note = f" на {d_str} в {t_str}" if (d_str and t_str) else (f" на {d_str}" if d_str else "")
+        return f"Зафиксировано! {kind} «{saved.get('action', '')}»{when_note} сохранена."
 
     if ui_status == "Готова" and operation == "cancel":
         return "Запись отменена. Готова к новому запросу."
@@ -1055,8 +1069,8 @@ def format_spoken_response(result: Dict[str, Any]) -> str:
     if operation == "list_period":
         items = result.get("items") or []
         period = result.get("period") or {}
-        start_s = format_date_ru(period.get("start", ""))
-        end_s = format_date_ru(period.get("end", ""))
+        start_s = format_date_ru(period.get("start"))
+        end_s = format_date_ru(period.get("end"))
         period_label = start_s if start_s == end_s else f"с {start_s} по {end_s}"
         if not items:
             return f"На период {period_label} запланированных дел нет."
@@ -1112,8 +1126,3 @@ def run_agent_turn(
     )
     res["spoken_response"] = format_spoken_response(res)
     return res
-
-
-def run_agent_loop(user_query: str, history: Optional[List[Dict[str, str]]] = None, user_id: int = 1) -> str:
-    turn_result = run_agent_turn(user_query=user_query, history=history, user_id=user_id)
-    return turn_result["spoken_response"]

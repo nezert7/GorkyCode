@@ -4,7 +4,7 @@ import threading
 import time
 import uvicorn
 import webview
-import requests
+import httpx
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
@@ -40,10 +40,10 @@ def wait_for_server(url: str, timeout: int = 15) -> bool:
     start_time = time.time()
     while time.time() - start_time < timeout:
         try:
-            res = requests.get(f"{url}/docs", timeout=2)
+            res = httpx.get(f"{url}/docs", timeout=2.0)
             if res.status_code == 200:
                 return True
-        except requests.RequestException:
+        except httpx.HTTPError:
             time.sleep(0.2)
     return False
 
