@@ -44,7 +44,7 @@ def get_user_memory(user_id: int) -> MemoryManager:
 
 
 def _background_notification_worker():
-    """Фоновый поток в ОЗУ: каждые 30 сек проверяет задачи за 1 час до начала."""
+    """каждые 30 сек проверяет задачи за 1 час до начала"""
     while True:
         try:
             agent = get_shared_agent()
@@ -66,7 +66,7 @@ def _background_notification_worker():
 threading.Thread(target=_background_notification_worker, daemon=True).start()
 
 
-# ==================== МОДЕЛИ ДАННЫХ ====================
+# МОДЕЛИ ДАННЫХ
 
 class AuthRequest(BaseModel):
     username: str
@@ -108,7 +108,7 @@ class TextQueryResponse(BaseModel):
     hint: Optional[str] = None
 
 
-# ==================== АВТОРИЗАЦИЯ ====================
+# АВТОРИЗАЦИЯ
 
 @app.post("/api/auth/register", response_model=AuthResponse)
 async def register_endpoint(req: AuthRequest):
@@ -153,7 +153,7 @@ async def me_endpoint(current_user: Dict[str, Any] = Depends(get_current_user)):
     return {"user": current_user}
 
 
-# ==================== IN-MEMORY ГОЛОС И ЧАТ ====================
+#  IN-MEMORY ГОЛОС И ЧАТ
 
 async def _build_response_with_tts(turn_result: Dict[str, Any], user_id: int) -> TextQueryResponse:
     spoken_text = turn_result.get("spoken_response") or format_spoken_response(turn_result)
@@ -276,7 +276,7 @@ async def get_audio_from_ram(filename: str):
     raise HTTPException(status_code=404, detail="Audio not found in memory")
 
 
-# ==================== ЗАДАЧИ, ИСТОРИЯ И КАЛЕНДАРЬ ====================
+#  ЗАДАЧИ, ИСТОРИЯ И КАЛЕНДАРЬ
 
 @app.get("/api/history")
 async def get_history_endpoint(

@@ -28,7 +28,7 @@ try:
 except Exception:
     av = None
 
-# Загрузка локальной модели Сбера GigaAM v3 / v2 (ONNX CPU)
+# Загрузка локальной модели GigaAM
 gigaam_model = None
 for _model_name in ("gigaam-v3-e2e-ctc", "gigaam-v2-ctc"):
     try:
@@ -44,11 +44,7 @@ if gigaam_model is None:
 
 
 class VoiceService:
-    """
-    Голосовой сервис полностью в оперативной памяти (ОЗУ):
-    - STT: декодирование байтов через PyAV в ОЗУ + обрезка тишины -> Sber GigaAM (ONNX CPU).
-    - TTS: генерация MP3-потока через edge-tts напрямую в память с LRU-кэшем фраз.
-    """
+    """ Голосовой сервис полностью в оперативной памяти (ОЗУ)"""
 
     MAX_AUDIO_CACHE = 20
     MAX_PHRASE_CACHE = 64
@@ -120,7 +116,7 @@ class VoiceService:
         return None
 
     def transcribe_audio_bytes(self, audio_bytes: bytes) -> Tuple[str, float]:
-        """Распознаёт речь через GigaAM напрямую из байтов в ОЗУ без создания файлов на диске."""
+        """Распознаёт речь через GigaAM напрямую из байтов"""
         duration_sec = self.estimate_duration_from_bytes(audio_bytes)
         t0 = time.time()
 
@@ -146,7 +142,7 @@ class VoiceService:
         return "", duration_sec
 
     async def text_to_speech_bytes(self, text: str) -> Optional[bytes]:
-        """Генерирует MP3-байты через edge-tts напрямую в ОЗУ с кэшированием фраз."""
+        """Генерирует MP3-байты через edge-tts напрямую в ОЗУ с кэшированием фраз"""
         clean_text = (text or "").strip()
         if not clean_text:
             return None
@@ -173,7 +169,7 @@ class VoiceService:
             return None
 
     async def text_to_speech_in_memory(self, text: str, audio_key: str = "reply.mp3") -> Optional[str]:
-        """Сохраняет озвучку в кольцевой словарь ОЗУ (self.memory_audio)."""
+        """Сохраняет озвучку в кольцевой словарь ОЗУ"""
         mp3_bytes = await self.text_to_speech_bytes(text)
         if not mp3_bytes:
             return None

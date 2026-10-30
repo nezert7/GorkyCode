@@ -17,7 +17,7 @@ load_dotenv(override=True)
 
 
 def format_date_ru(date_str: Optional[str]) -> str:
-    """Форматирует YYYY-MM-DD в ДД.ММ.ГГГГ для единого вывода на экран."""
+    """Форматирует дату и время"""
     if not date_str:
         return ""
     m = re.match(r"^(\d{4})-(\d{2})-(\d{2})$", date_str)
@@ -302,7 +302,6 @@ class VoiceUpdateExtractor:
 
 
 class RegexFallbackParser:
-    """Мгновенный локальный парсер на регулярных выражениях."""
 
     MEETING_KEYWORDS = ("встреч", "созвон", "обед с", "приём", "прием", "планёрк", "планерк", "стоматолог", "врач")
     REMINDER_KEYWORDS = ("напомни", "напоминан", "напоминалк", "не забыть", "не забудь")
@@ -333,7 +332,7 @@ class RegexFallbackParser:
 
     @classmethod
     def parse_standalone_command(cls, text: str, now: datetime) -> Optional[Dict[str, Any]]:
-        """Проверяет, является ли фраза самостоятельной командой (update, delete, complete, search, list_period)."""
+        """самостоятельная ли команда"""
         clean = text.strip()
         lower_text = clean.lower()
 
@@ -455,7 +454,7 @@ class RegexFallbackParser:
 
 
 class GigaChatClient:
-    """Прямой легковесный клиент GigaChat API поверх httpx."""
+    """клиент GigaChat"""
 
     OAUTH_URL = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
     CHAT_URL = "https://gigachat.devices.sberbank.ru/api/v1/chat/completions"
@@ -534,7 +533,7 @@ class GigaChatClient:
 
 
 class VoronaAgentCore:
-    """Ядро голосового ассистента «Ворона» (только GigaChat + RegEx, работа в ОЗУ)."""
+    """Ядро голосового ассистента"""
 
     def __init__(self, db: DatabaseManager, **_kwargs):
         self.db = db
@@ -666,7 +665,6 @@ class VoronaAgentCore:
 
         clean_input = raw_text.strip()
 
-        # Если фронтенд прислал техническую фразу для сохранения с дефолтами:
         if "по умолчанию" in clean_input.lower() or "оставь как есть" in clean_input.lower():
             staged = self.pending_buffer.get(session_key) or {}
             final_action = (staged.get("action") or "").strip() or "Событие"
@@ -697,7 +695,6 @@ class VoronaAgentCore:
                 }
             }
 
-        # Если новая реплика — это явная самостоятельная команда (удали, перенеси, найди, что у меня),
         # сбрасываем незаконченный черновик, чтобы не склеивать их друг с другом
         if RegexFallbackParser.parse_standalone_command(clean_input, now) is not None:
             self.pending_buffer.pop(session_key, None)

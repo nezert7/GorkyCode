@@ -29,10 +29,7 @@ def _b64url_decode(text: str) -> bytes:
 
 
 def validate_password_strength(password: str, username: str = "") -> Optional[str]:
-    """
-    Проверяет сложность пароля при регистрации.
-    Возвращает подробную строку с тем, что нужно исправить, или None, если пароль надёжный.
-    """
+    """Проверка сложности пароля при регистрации"""
     issues: List[str] = []
 
     if len(password) < 8:
@@ -56,7 +53,7 @@ def validate_password_strength(password: str, username: str = "") -> Optional[st
 
 
 def hash_password(password: str, salt: Optional[str] = None) -> str:
-    """Хеширует пароль алгоритмом PBKDF2-HMAC-SHA256 со случайной солью."""
+    """Хеширует пароль алгоритмом PBKDF2-HMAC-SHA256"""
     salt_str = salt or secrets.token_hex(16)
     dk = hashlib.pbkdf2_hmac(
         "sha256",
@@ -117,7 +114,7 @@ async def get_current_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_scheme),
     token_query: Optional[str] = Query(None, alias="token")
 ) -> Dict[str, Any]:
-    """FastAPI-зависимость: возвращает авторизованного пользователя или ошибку 401."""
+    """FastAPI-зависимость"""
     raw_token = None
     if credentials and credentials.credentials:
         raw_token = credentials.credentials

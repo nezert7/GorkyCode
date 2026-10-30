@@ -28,9 +28,8 @@ def get_intent_label_ru(intent: Optional[str]) -> str:
     return "Задача"
 
 
-# =====================================================================
-# ДРАЙВЕР ОБЛАЧНОЙ БАЗЫ TURSO (SQLite over HTTPS /v2/pipeline)
-# =====================================================================
+# ДРАЙВЕР ОБЛАЧНОЙ БАЗЫ TURSO
+
 
 class TursoCursor:
     def __init__(self, conn: "TursoConnection"):
@@ -134,9 +133,9 @@ class TursoConnection:
         return first.get("response", {}).get("result", {})
 
 
-# =====================================================================
-# ВЕКТОРИЗАЦИЯ И КАЛЕНДАРЬ (В ОЗУ БЕЗ ЗАПИСИ ФАЙЛОВ НА ДИСК)
-# =====================================================================
+
+# ВЕКТОРИЗАЦИЯ И КАЛЕНДАРЬ
+
 
 class TextVectorizer:
     STOP_LEMMAS = {
@@ -184,11 +183,7 @@ class TextVectorizer:
 
 
 class CalendarIntegration:
-    """
-    Кроссплатформенная синхронизация с системным календарём и уведомлениями без создания файлов на диске:
-    - macOS: Apple Calendar (osascript) + нативные баннеры.
-    - Windows: Toast-уведомления Windows 10/11 + генерация .ics в ОЗУ.
-    """
+    """Кроссплатформенная синхронизация с системным календарём и уведомлениями без создания файлов на диске:"""
 
     @classmethod
     def sync_event_to_os_calendar(cls, item: Dict[str, Any]) -> bool:
@@ -328,7 +323,7 @@ class CalendarIntegration:
 
     @classmethod
     def export_all_to_ics(cls, items: List[Dict[str, Any]]) -> str:
-        """Формирует содержимое .ics в оперативной памяти (без записи vorona_calendar.ics на диск)."""
+        """Формирует содержимое .ics в оперативной памяти"""
         lines = [
             "BEGIN:VCALENDAR",
             "VERSION:2.0",
@@ -369,16 +364,11 @@ class CalendarIntegration:
         return "\r\n".join(lines)
 
 
-# =====================================================================
 # МЕНЕДЖЕР БАЗЫ ДАННЫХ (Turso Cloud ИЛИ Чистый In-Memory SQLite)
-# =====================================================================
+
 
 class DatabaseManager:
-    """
-    Хранение данных полностью без создания локальных файлов:
-    - Если задан TURSO_DATABASE_URL -> используется облачная БД Turso.
-    - Иначе -> используется shared-база SQLite в оперативной памяти (ОЗУ).
-    """
+    """Хранение данных полностью без создания локальных файлов"""
 
     def __init__(self, db_path: str = ":memory:"):
         self.db_path = db_path
@@ -399,7 +389,7 @@ class DatabaseManager:
             self._turso_http = httpx.Client(timeout=15.0)
             print(f"☁️ [ОБЛАЧНАЯ БД] Подключена база Turso SQLite: {raw_url}")
         else:
-            # Удерживаем корневое соединение в ОЗУ, чтобы таблицы сохранялись между потоками без файла на диске
+            # Удерживаем корневое соединение в ОЗУ
             self._mem_uri = f"file:vorona_ram_{id(self)}?mode=memory&cache=shared"
             self._keepalive_mem_conn = sqlite3.connect(
                 self._mem_uri, uri=True, check_same_thread=False
