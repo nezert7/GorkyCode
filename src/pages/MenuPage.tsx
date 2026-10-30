@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, type CSSProperties } from 'react'
 import { Link } from 'react-router-dom'
 import Logo from '../components/Logo'
 import { acknowledgeTurn, cancelPending, recognizeSpeech, savePlan, type VoiceResponse } from '../api/voice'
@@ -32,6 +32,21 @@ function getFontSize(text: string): string {
   if (len > 80) return 'calc(var(--u) * 20)'
   if (len > 40) return 'calc(var(--u) * 24)'
   return 'calc(var(--u) * 32)'
+}
+
+const actionsRowStyle: CSSProperties = {
+  position: 'absolute',
+  left: 'calc(var(--u) * 72)',
+  top: 'calc(var(--u) * 699)',
+  width: 'calc(var(--u) * 655)',
+  display: 'flex',
+  justifyContent: 'space-between',
+  alignItems: 'center',
+}
+
+const inlineActionBtnStyle: CSSProperties = {
+  position: 'static',
+  fontSize: 'calc(var(--u) * 24)',
 }
 
 export default function MenuPage() {
@@ -122,7 +137,6 @@ export default function MenuPage() {
     try {
       await acknowledgeTurn()
     } catch {
-      // экран всё равно можно закрыть
     }
     setMode('idle')
   }
@@ -172,23 +186,32 @@ export default function MenuPage() {
               {generatedText}
             </div>
 
-            <button className="result-action result-action--reply" disabled={busy} onClick={handleSave}>
-              сохранить
-            </button>
-            <button
-              className="result-action result-action--continue-middle"
-              disabled={busy}
-              onClick={handleReply}
-            >
-              изменить
-            </button>
-            <button
-              className="result-action result-action--cancel-right"
-              disabled={busy}
-              onClick={handleCancel}
-            >
-              отменить
-            </button>
+            <div style={actionsRowStyle}>
+              <button
+                className="result-action"
+                style={inlineActionBtnStyle}
+                disabled={busy}
+                onClick={handleSave}
+              >
+                сохранить
+              </button>
+              <button
+                className="result-action"
+                style={inlineActionBtnStyle}
+                disabled={busy}
+                onClick={handleReply}
+              >
+                изменить
+              </button>
+              <button
+                className="result-action"
+                style={inlineActionBtnStyle}
+                disabled={busy}
+                onClick={handleCancel}
+              >
+                отменить
+              </button>
+            </div>
           </>
         )}
 
@@ -197,16 +220,25 @@ export default function MenuPage() {
             <div className="result-box" style={{ fontSize: getFontSize(generatedText) }}>
               {generatedText}
             </div>
-            <button className="result-action result-action--reply" disabled={busy} onClick={handleCancel}>
-              откатить
-            </button>
-            <button
-              className="result-action result-action--cancel-right"
-              disabled={busy}
-              onClick={handleDone}
-            >
-              готово
-            </button>
+
+            <div style={actionsRowStyle}>
+              <button
+                className="result-action"
+                style={inlineActionBtnStyle}
+                disabled={busy}
+                onClick={handleCancel}
+              >
+                откатить
+              </button>
+              <button
+                className="result-action"
+                style={inlineActionBtnStyle}
+                disabled={busy}
+                onClick={handleDone}
+              >
+                готово
+              </button>
+            </div>
           </>
         )}
 
@@ -223,7 +255,10 @@ export default function MenuPage() {
 
         {isFinal && (
           <>
-            <div className="result-box result-box--saved" style={{ fontSize: getFontSize(mode === 'saved' ? generatedText : errorText) }}>
+            <div
+              className="result-box result-box--saved"
+              style={{ fontSize: getFontSize(mode === 'saved' ? generatedText : errorText) }}
+            >
               {mode === 'saved' ? generatedText : errorText}
             </div>
             <button className="result-action result-action--home" onClick={() => setMode('idle')}>
