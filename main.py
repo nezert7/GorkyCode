@@ -291,7 +291,7 @@ async def get_audio_from_ram(filename: str):
 
 @app.get("/api/history")
 async def get_history_endpoint(
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     intent: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
