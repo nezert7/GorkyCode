@@ -2,12 +2,19 @@ import os
 import sys
 import threading
 import time
+
+
+def get_base_path() -> str:
+    return getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+
+
+from dotenv import load_dotenv
+load_dotenv(os.path.join(get_base_path(), ".env"), override=True)
+
 import uvicorn
 import webview
 import httpx
-from dotenv import load_dotenv
-
-load_dotenv(override=True)
+from main import app
 
 if sys.platform == "darwin":
     try:
@@ -27,13 +34,12 @@ if sys.platform == "darwin":
             delegate_cls.webView_requestMediaCapturePermissionForOrigin_initiatedByFrame_type_decisionHandler_ = (
                 webView_requestMediaCapturePermissionForOrigin_initiatedByFrame_type_decisionHandler_
             )
-            print("[*] WebKit: доступ к микрофону автоматически разрешён.")
     except Exception:
         pass
 
 
 def run_server():
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, log_level="warning")
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
 
 
 def wait_for_server(url: str, timeout: int = 15) -> bool:
@@ -52,7 +58,6 @@ def main():
     remote_url = (os.getenv("VORONA_SERVER_URL") or "").strip().rstrip("/")
 
     if remote_url:
-        print(f"[*] Подключение к единому удалённому серверу Вороны: {remote_url}")
         target_url = remote_url
     else:
         server_url = "http://localhost:8000" if sys.platform == "darwin" else "http://127.0.0.1:8000"
@@ -61,15 +66,11 @@ def main():
         server_thread = threading.Thread(target=run_server, daemon=True)
         server_thread.start()
 
-        print("[*] Запуск локального сервера FastAPI (порт 8000)...")
         if not wait_for_server(check_url):
-            print("[!] Сервер не ответил вовремя. Проверьте порт 8000.")
             return
 
-        frontend_index = os.path.join(os.path.dirname(__file__), "static_frontend", "index.html")
+        frontend_index = os.path.join(get_base_path(), "static_frontend", "index.html")
         target_url = server_url if os.path.exists(frontend_index) else f"{server_url}/docs"
-
-    print(f"[*] Открытие окна ({target_url})...")
 
     webview.create_window(
         title="Ворона — Голосовой ассистент задач и встреч",

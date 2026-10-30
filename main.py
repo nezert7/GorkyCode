@@ -2,6 +2,7 @@ import os
 import time
 import asyncio
 import threading
+import sys
 from typing import Optional, Dict, Any, List
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -391,8 +392,8 @@ async def clear_history(current_user: Dict[str, Any] = Depends(get_current_user)
     get_shared_agent().cancel_pending("default", user_id=user_id)
     return {"status": "ok", "message": "History cleared"}
 
-
-FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "static_frontend")
+BASE_DIR = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+FRONTEND_DIR = os.path.join(BASE_DIR, "static_frontend")
 
 if os.path.exists(FRONTEND_DIR):
     assets_dir = os.path.join(FRONTEND_DIR, "assets")
