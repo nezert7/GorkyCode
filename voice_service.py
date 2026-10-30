@@ -1,18 +1,17 @@
 import os
+import io
 import wave
 import time
-import logging
 import asyncio
 import edge_tts
 import sounddevice as sd
 import numpy as np
-from typing import Tuple, Optional
-from openai import OpenAI
+from typing import Tuple, Optional, Dict
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
-# === ФИКС НЕСОВМЕСТИМОСТИ PYAV И FASTER-WHISPER (metadata_errors) ===
+# Патч совместимости PyAV
 try:
     import av
     _orig_av_open = av.open
@@ -23,13 +22,12 @@ try:
 
     av.open = _safe_av_open
 except Exception:
-    pass
+    av = None
 
-# === 1. ЗАГРУЗКА ЛОКАЛЬНОЙ МОДЕЛИ СБЕРА GIGAAM V3 НА CPU (БЕЗ ОШИБОК COREML) ===
+# Загрузка локальной модели Сбера GigaAM v3 (ONNX CPU)
 gigaam_model = None
 try:
     import onnx_asr
-    # Принудительно используем CPUExecutionProvider, чтобы избежать сбоя CoreMLExecutionProvider на macOS
     gigaam_model = onnx_asr.load_model(
         "gigaam-v3-e2e-ctc",
         providers=["CPUExecutionProvider"]
@@ -47,95 +45,71 @@ except Exception as e:
         gigaam_model = None
         print(f"⚠️ [STT] Не удалось загрузить GigaAM ({e} / {sub_e})")
 
-# === 2. ЗАГРУЗКА FASTER-WHISPER (РЕЗЕРВ И ДЕКОДЕР АУДИО) ===
-whisper_model = None
-try:
-    from faster_whisper import WhisperModel
-    import faster_whisper.audio
-    if hasattr(faster_whisper.audio, "av"):
-        faster_whisper.audio.av.open = _safe_av_open
-
-    model_size = os.getenv("WHISPER_MODEL_SIZE") or "base"
-    whisper_model = WhisperModel(model_size, device="cpu", compute_type="int8", cpu_threads=4)
-    print(f"✅ [STT] Резервная модель faster-whisper ({model_size}) готова.")
-except Exception as e:
-    print(f"⚠️ [STT] faster-whisper не загружен ({e}).")
-
 
 class VoiceService:
+    """
+    Голосовой сервис полностью в оперативной памяти (ОЗУ):
+    - STT: декодирование байтов через PyAV в ОЗУ -> распознавание через Sber GigaAM v3 (ONNX CPU).
+    - TTS: генерация MP3-потока через edge-tts напрямую в память без записи файлов на диск.
+    """
+
     def __init__(self, voice: str = "ru-RU-SvetlanaNeural"):
         self.voice = voice
+        self.memory_audio: Dict[str, bytes] = {}
 
     @staticmethod
-    def get_audio_duration(file_path: str) -> float:
-        try:
-            with wave.open(file_path, "rb") as wf:
-                frames = wf.getnframes()
-                rate = wf.getframerate()
-                if rate > 0:
-                    return frames / float(rate)
-        except Exception:
-            pass
-        try:
-            size_bytes = os.path.getsize(file_path)
-            return max(0.6, size_bytes / 16000.0) if size_bytes > 1200 else 0.2
-        except Exception:
-            return 2.0
+    def estimate_duration_from_bytes(audio_bytes: bytes) -> float:
+        if not audio_bytes or len(audio_bytes) < 800:
+            return 0.2
+        if audio_bytes.startswith(b"RIFF"):
+            try:
+                with wave.open(io.BytesIO(audio_bytes), "rb") as wf:
+                    rate = wf.getframerate()
+                    if rate > 0:
+                        return wf.getnframes() / float(rate)
+            except Exception:
+                pass
+        return max(0.8, len(audio_bytes) / 16000.0)
 
     @staticmethod
-    def _decode_audio_to_float32_16k(file_path: str) -> Optional[np.ndarray]:
-        """Декодирует любой аудиофайл (.webm, .ogg, .wav, .mp4) в 1D массив float32 (16 кГц) в ОЗУ."""
-        # Способ 1: через встроенный декодер faster_whisper.audio
-        try:
-            import faster_whisper.audio
-            waveform = faster_whisper.audio.decode_audio(file_path, sampling_rate=16000)
-            if waveform is not None and len(waveform) > 0:
-                return np.asarray(waveform, dtype=np.float32).flatten()
-        except Exception:
-            pass
+    def _decode_bytes_to_float32_16k(audio_bytes: bytes) -> Optional[np.ndarray]:
+        """Декодирует аудио из байтов в ОЗУ (.webm, .ogg, .wav, .mp4) в 1D массив float32 (16 кГц)."""
+        if not audio_bytes:
+            return None
 
-        # Способ 2: напрямую через PyAV
-        try:
-            import av
-            container = av.open(file_path)
-            resampler = av.AudioResampler(format="flt", layout="mono", rate=16000)
-            chunks = []
-            for frame in container.decode(audio=0):
-                for resampled in resampler.resample(frame):
-                    chunks.append(resampled.to_ndarray().flatten())
-            container.close()
-            if chunks:
-                return np.concatenate(chunks).astype(np.float32)
-        except Exception:
-            pass
+        # 1. Декодирование через PyAV напрямую из BytesIO в ОЗУ
+        if av is not None:
+            try:
+                container = av.open(io.BytesIO(audio_bytes))
+                resampler = av.AudioResampler(format="flt", layout="mono", rate=16000)
+                chunks = []
+                for frame in container.decode(audio=0):
+                    for resampled in resampler.resample(frame):
+                        chunks.append(resampled.to_ndarray().flatten())
+                container.close()
+                if chunks:
+                    return np.concatenate(chunks).astype(np.float32)
+            except Exception:
+                pass
+
+        # 2. Резерв для чистого WAV (16-bit PCM)
+        if audio_bytes.startswith(b"RIFF"):
+            try:
+                with wave.open(io.BytesIO(audio_bytes), "rb") as wf:
+                    frames = wf.readframes(wf.getnframes())
+                    samples = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+                    if wf.getnchannels() > 1:
+                        samples = samples[::wf.getnchannels()]
+                    return samples
+            except Exception:
+                pass
 
         return None
 
-    @staticmethod
-    def _cloud_whisper_fallback(file_path: str) -> str:
-        groq_key = (os.getenv("GROQ_API_KEY") or "").strip()
-        if not groq_key:
-            return ""
-        try:
-            from agent_core import get_shared_agent
-            http_client = get_shared_agent().http_client
-            client = OpenAI(
-                api_key=groq_key,
-                base_url="https://api.groq.com/openai/v1",
-                http_client=http_client
-            )
-            with open(file_path, "rb") as audio_file:
-                transcription = client.audio.transcriptions.create(
-                    model="whisper-large-v3-turbo",
-                    file=audio_file,
-                    language="ru"
-                )
-            return (transcription.text or "").strip()
-        except Exception as exc:
-            logging.error(f"Cloud STT fallback failed: {exc}")
-            return ""
-
     def record_and_transcribe(self, duration_sec: int = 5, sample_rate: int = 16000) -> Tuple[str, float]:
+        if gigaam_model is None:
+            raise RuntimeError("Модель GigaAM не загружена.")
+
         print(f"[*] Запись голоса ({duration_sec} сек)...")
         audio_data = sd.rec(
             int(duration_sec * sample_rate),
@@ -146,75 +120,75 @@ class VoiceService:
         sd.wait()
         waveform = audio_data.flatten()
 
-        if gigaam_model is not None:
-            res = gigaam_model.recognize(waveform, sample_rate=sample_rate)
-            text = (" ".join(res) if isinstance(res, list) else str(res or "")).strip()
-            return text, float(duration_sec)
-
-        if whisper_model is None:
-            raise RuntimeError("Модели STT не загружены.")
-        segments, _ = whisper_model.transcribe(waveform, language="ru", beam_size=1)
-        text = " ".join([segment.text for segment in segments]).strip()
+        res = gigaam_model.recognize(waveform, sample_rate=sample_rate)
+        text = (" ".join(str(x) for x in res) if isinstance(res, list) else str(res or "")).strip()
         return text, float(duration_sec)
 
-    def transcribe_audio_file(self, file_path: str) -> Tuple[str, float]:
-        duration_sec = self.get_audio_duration(file_path)
+    def transcribe_audio_bytes(self, audio_bytes: bytes, filename: str = "record.webm") -> Tuple[str, float]:
+        """Распознаёт речь через GigaAM v3 напрямую из байтов в ОЗУ без создания файлов на диске."""
+        duration_sec = self.estimate_duration_from_bytes(audio_bytes)
         t0 = time.time()
-        print(f"🎙 [STT] Получен аудиофайл: {file_path} (~{duration_sec:.2f} сек)")
 
-        if duration_sec < 0.5:
+        if duration_sec < 0.5 or gigaam_model is None:
             return "", duration_sec
 
-        # 1. Основной движок: Sber GigaAM v3 (работает в ОЗУ на CPU без CoreML-ошибок)
-        if gigaam_model is not None:
+        try:
+            waveform = self._decode_bytes_to_float32_16k(audio_bytes)
+            if waveform is not None and waveform.size > 0:
+                real_duration = float(waveform.size) / 16000.0
+                if real_duration < 0.4:
+                    return "", real_duration
+
+                giga_text = gigaam_model.recognize(waveform, sample_rate=16000)
+                if isinstance(giga_text, list):
+                    giga_text = " ".join(str(x) for x in giga_text)
+                giga_text = (giga_text or "").strip()
+                print(f"📝 [STT GigaAM v3] ({time.time() - t0:.2f} сек) Распознано: «{giga_text}»")
+                return giga_text, real_duration
+        except Exception as exc:
+            print(f"⚠️ [STT GigaAM] Ошибка распознавания: {exc}")
+
+        return "", duration_sec
+
+    def transcribe_audio_file(self, file_path: str) -> Tuple[str, float]:
+        """Совместимость: читает файл в память и сразу удаляет его с диска."""
+        if not file_path or not os.path.exists(file_path):
+            return "", 0.0
+        try:
+            with open(file_path, "rb") as f:
+                audio_bytes = f.read()
+        finally:
             try:
-                waveform = self._decode_audio_to_float32_16k(file_path)
-                if waveform is not None and waveform.size > 0:
-                    giga_text = gigaam_model.recognize(waveform, sample_rate=16000)
-                    if isinstance(giga_text, list):
-                        giga_text = " ".join(str(x) for x in giga_text)
-                    giga_text = (giga_text or "").strip()
-                    if giga_text:
-                        print(f"📝 [STT Sber GigaAM v3] ({time.time() - t0:.2f} сек) Распознано: «{giga_text}»")
-                        return giga_text, duration_sec
-            except Exception as exc:
-                print(f"⚠️ [STT GigaAM] Ошибка ({exc}), переключение на faster-whisper.")
+                os.remove(file_path)
+            except OSError:
+                pass
+        return self.transcribe_audio_bytes(audio_bytes, os.path.basename(file_path))
 
-        # 2. Резервный локальный движок: faster-whisper
-        if whisper_model is not None:
-            try:
-                segments, _ = whisper_model.transcribe(
-                    file_path,
-                    language="ru",
-                    beam_size=2,
-                    vad_filter=True,
-                    vad_parameters=dict(min_silence_duration_ms=300),
-                    condition_on_previous_text=False
-                )
-                text = " ".join([segment.text for segment in segments]).strip()
-                print(f"📝 [STT faster-whisper] ({time.time() - t0:.2f} сек) Распознано: «{text}»")
-                if text:
-                    return text, duration_sec
-            except Exception as exc:
-                print(f"⚠️ [STT] Ошибка faster-whisper: {exc}")
-                logging.error(f"Local faster-whisper error: {exc}")
-
-        # 3. Облачный резерв (если задан GROQ_API_KEY)
-        cloud_text = self._cloud_whisper_fallback(file_path)
-        if cloud_text:
-            print(f"📝 [STT Cloud] Распознано: «{cloud_text}»")
-        return cloud_text, duration_sec
-
-    async def text_to_speech_file(self, text: str, output_path: str) -> Optional[str]:
-        if not text:
+    async def text_to_speech_bytes(self, text: str) -> Optional[bytes]:
+        """Генерирует MP3-байты через edge-tts напрямую в ОЗУ."""
+        if not text or not text.strip():
             return None
         try:
             communicate = edge_tts.Communicate(text, self.voice)
-            await communicate.save(output_path)
-            return output_path
-        except Exception as exc:
-            logging.error(f"Code E21: TTS generation failed ({type(exc).__name__}: {exc})")
+            buffer = bytearray()
+            async for chunk in communicate.stream():
+                if chunk.get("type") == "audio" and chunk.get("data"):
+                    buffer.extend(chunk["data"])
+            return bytes(buffer) if buffer else None
+        except Exception:
             return None
+
+    async def text_to_speech_file(self, text: str, output_path: str = "reply.mp3") -> Optional[str]:
+        """Сохраняет озвучку в словарь ОЗУ (self.memory_audio) без создания mp3-файлов на диске."""
+        mp3_bytes = await self.text_to_speech_bytes(text)
+        if not mp3_bytes:
+            return None
+        key = os.path.basename(output_path) if output_path else "reply.mp3"
+        self.memory_audio[key] = mp3_bytes
+        return key
+
+    def get_cached_audio(self, filename: str) -> Optional[bytes]:
+        return self.memory_audio.get(os.path.basename(filename))
 
     def text_to_speech(self, text: str, output_path: str = "output.mp3") -> Optional[str]:
         return asyncio.run(self.text_to_speech_file(text, output_path))

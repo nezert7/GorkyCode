@@ -1,36 +1,22 @@
 import os
-import shutil
-import threading
 import time
+import inspect
+import asyncio
+import threading
 from typing import Optional, Dict, Any, List
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Depends, status
-from fastapi.security import HTTPAuthorizationCredentials
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from auth import (
-    hash_password,
-    verify_password,
-    create_access_token,
-    decode_access_token,
-    security_scheme
-)
+from auth import hash_password, verify_password, create_access_token, get_current_user
 from database import CalendarIntegration, get_intent_label_ru
 from prompts_and_memory import MemoryManager
 from voice_service import VoiceService
 from agent_core import run_agent_turn, get_shared_agent, format_spoken_response
-from auth import (
-    hash_password,
-    verify_password,
-    validate_password_strength,
-    create_access_token,
-    decode_access_token,
-    security_scheme
-)
 
-
-app = FastAPI(title="Ворона — Voice Assistant Desktop API")
+app = FastAPI(title="Ворона — In-Memory Voice Assistant API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -42,9 +28,7 @@ app.add_middleware(
 
 voice_service = VoiceService()
 
-TEMP_DIR = "temp_audio"
-os.makedirs(TEMP_DIR, exist_ok=True)
-
+# Хранилища в ОЗУ (без создания файлов на диске)
 _user_memories: Dict[int, MemoryManager] = {}
 _pending_ui_notifications: Dict[int, List[Dict[str, Any]]] = {}
 
@@ -55,40 +39,30 @@ def get_user_memory(user_id: int) -> MemoryManager:
     return _user_memories[user_id]
 
 
-async def get_active_user(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_scheme),
-    token_query: Optional[str] = Query(None, alias="token")
-) -> Dict[str, Any]:
-    """Извлекает пользователя из токена, а если фронтенд закэширован — безопасно использует user_id=1."""
-    raw_token = None
-    if credentials and credentials.credentials:
-        raw_token = credentials.credentials
-    elif token_query:
-        raw_token = token_query
-
-    if raw_token:
-        user_data = decode_access_token(raw_token)
-        if user_data:
-            return user_data
-
-    return {"id": 1, "username": "default"}
+def _call_with_optional_user_id(func, *args, user_id: int = 1, **kwargs):
+    """Безопасный вызов: передаёт user_id, если функция его поддерживает."""
+    sig = inspect.signature(func)
+    if "user_id" in sig.parameters:
+        kwargs["user_id"] = user_id
+    return func(*args, **kwargs)
 
 
 def _background_notification_worker():
+    """Фоновый поток в ОЗУ: каждые 30 сек проверяет задачи за 1 час до начала."""
     while True:
         try:
             agent = get_shared_agent()
-            due_items = agent.db.check_and_trigger_upcoming_notifications()
-            for item in due_items:
-                uid = int(item.get("user_id") or 1)
-                kind = get_intent_label_ru(item.get("intent"))
-                msg = f"Напоминание за час! {kind}: «{item.get('action')}» в {item.get('parsed_time')}."
-                _pending_ui_notifications.setdefault(uid, []).append({
-                    "id": item.get("id"),
-                    "message": msg,
-                    "item": item
-                })
-                print(f"🔔 [УВЕДОМЛЕНИЕ ЗА ЧАС | user_id={uid}] {msg}")
+            if hasattr(agent.db, "check_and_trigger_upcoming_notifications"):
+                due_items = agent.db.check_and_trigger_upcoming_notifications()
+                for item in due_items:
+                    uid = int(item.get("user_id") or 1)
+                    kind = get_intent_label_ru(item.get("intent"))
+                    msg = f"Напоминание за час! {kind}: «{item.get('action')}» в {item.get('parsed_time')}."
+                    _pending_ui_notifications.setdefault(uid, []).append({
+                        "id": item.get("id"),
+                        "message": msg,
+                        "item": item
+                    })
         except Exception:
             pass
         time.sleep(30)
@@ -97,7 +71,7 @@ def _background_notification_worker():
 threading.Thread(target=_background_notification_worker, daemon=True).start()
 
 
-# ==================== СХЕМЫ ЗАПРОСОВ И ОТВЕТОВ ====================
+# ==================== МОДЕЛИ ДАННЫХ ====================
 
 class AuthRequest(BaseModel):
     username: str
@@ -139,7 +113,7 @@ class TextQueryResponse(BaseModel):
     hint: Optional[str] = None
 
 
-# ==================== ЭНДПОИНТЫ АВТОРИЗАЦИИ ====================
+# ==================== АВТОРИЗАЦИЯ ====================
 
 @app.post("/api/auth/register", response_model=AuthResponse)
 async def register_endpoint(req: AuthRequest):
@@ -152,20 +126,15 @@ async def register_endpoint(req: AuthRequest):
         raise HTTPException(status_code=400, detail="Пароль должен содержать минимум 4 символа")
 
     agent = get_shared_agent()
-    existing = agent.db.get_user_by_username(username)
-    if existing:
+    if agent.db.get_user_by_username(username):
         raise HTTPException(status_code=409, detail="Пользователь с таким логином уже существует")
 
-    pwd_hash = hash_password(password)
-    created_user = agent.db.create_user(username, pwd_hash)
+    created_user = agent.db.create_user(username, hash_password(password))
     if not created_user:
         raise HTTPException(status_code=500, detail="Не удалось создать пользователя")
 
     token = create_access_token(created_user["id"], created_user["username"])
-    return AuthResponse(
-        token=token,
-        user={"id": created_user["id"], "username": created_user["username"]}
-    )
+    return AuthResponse(token=token, user={"id": created_user["id"], "username": created_user["username"]})
 
 
 @app.post("/api/auth/login", response_model=AuthResponse)
@@ -176,38 +145,26 @@ async def login_endpoint(req: AuthRequest):
     agent = get_shared_agent()
     user_row = agent.db.get_user_by_username(username)
     if not user_row or not verify_password(password, user_row["password_hash"]):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Неверный логин или пароль"
-        )
+        raise HTTPException(status_code=401, detail="Неверный логин или пароль")
 
     token = create_access_token(user_row["id"], user_row["username"])
-    return AuthResponse(
-        token=token,
-        user={"id": user_row["id"], "username": user_row["username"]}
-    )
+    return AuthResponse(token=token, user={"id": user_row["id"], "username": user_row["username"]})
 
 
 @app.get("/api/auth/me")
-async def me_endpoint(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_scheme)
-):
-    raw_token = credentials.credentials if credentials else ""
-    user_data = decode_access_token(raw_token)
-    if not user_data:
-        raise HTTPException(status_code=401, detail="Необходима авторизация")
-    return {"user": user_data}
+async def me_endpoint(current_user: Dict[str, Any] = Depends(get_current_user)):
+    return {"user": current_user}
 
 
-# ==================== ГОЛОСОВОЙ И ТЕКСТОВЫЙ ЧАТ ====================
+# ==================== IN-MEMORY ГОЛОС И ЧАТ ====================
 
 async def _build_response_with_tts(turn_result: Dict[str, Any], user_id: int) -> TextQueryResponse:
     spoken_text = turn_result.get("spoken_response") or format_spoken_response(turn_result)
-    audio_filename = f"reply_u{user_id}.mp3"
-    audio_path = os.path.join(TEMP_DIR, audio_filename)
+    audio_key = f"reply_u{user_id}.mp3"
 
-    saved_audio = await voice_service.text_to_speech_file(spoken_text, audio_path)
-    audio_url = f"/api/audio/{audio_filename}" if saved_audio else None
+    # Сохраняет MP3-байты в словарь ОЗУ (voice_service.memory_audio), на диск ничего не пишется
+    saved_key = await voice_service.text_to_speech_file(spoken_text, audio_key)
+    audio_url = f"/api/audio/{saved_key}" if saved_key else None
 
     return TextQueryResponse(
         response=spoken_text,
@@ -231,7 +188,7 @@ async def _build_response_with_tts(turn_result: Dict[str, Any], user_id: int) ->
 @app.post("/api/chat", response_model=TextQueryResponse)
 async def chat_endpoint(
     data: TextQueryRequest,
-    current_user: Dict[str, Any] = Depends(get_active_user)
+    current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     user_id = int(current_user["id"])
     user_text = data.query.strip()
@@ -240,7 +197,10 @@ async def chat_endpoint(
     if user_text:
         mem.add_message("user", user_text)
 
-    turn_result = run_agent_turn(
+    # Выполняем ход агента в отдельном потоке, не блокируя FastAPI
+    turn_result = await asyncio.to_thread(
+        _call_with_optional_user_id,
+        run_agent_turn,
         user_query=user_text,
         history=mem.get_messages(),
         session_id=data.session_id,
@@ -257,19 +217,16 @@ async def chat_endpoint(
 @app.post("/api/voice-chat", response_model=TextQueryResponse)
 async def voice_chat_endpoint(
     file: UploadFile = File(...),
-    current_user: Dict[str, Any] = Depends(get_active_user)
+    current_user: Dict[str, Any] = Depends(get_current_user)
 ):
-    user_id = int(current_user["id"])
-    safe_name = os.path.basename(file.filename or "record.webm")
-    temp_input = os.path.join(TEMP_DIR, f"input_u{user_id}_{int(time.time() * 1000)}_{safe_name}")
-    with open(temp_input, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    # Читаем аудиопоток сразу в ОЗУ — никаких временных файлов на диске!
+    audio_bytes = await file.read()
 
-    try:
-        user_text, duration_sec = voice_service.transcribe_audio_file(temp_input)
-    finally:
-        if os.path.exists(temp_input):
-            os.remove(temp_input)
+    user_text, duration_sec = await asyncio.to_thread(
+        voice_service.transcribe_audio_bytes,
+        audio_bytes,
+        file.filename or "record.webm"
+    )
 
     return await chat_endpoint(
         TextQueryRequest(
@@ -284,11 +241,16 @@ async def voice_chat_endpoint(
 @app.post("/api/confirm", response_model=TextQueryResponse)
 async def confirm_pending_endpoint(
     req: SessionActionRequest = SessionActionRequest(),
-    current_user: Dict[str, Any] = Depends(get_active_user)
+    current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     user_id = int(current_user["id"])
     agent = get_shared_agent()
-    res = agent.confirm_pending(session_id=req.session_id, user_id=user_id)
+    res = await asyncio.to_thread(
+        _call_with_optional_user_id,
+        agent.confirm_pending,
+        session_id=req.session_id,
+        user_id=user_id
+    )
     res["spoken_response"] = format_spoken_response(res)
     get_user_memory(user_id).add_message("assistant", res["spoken_response"])
     return await _build_response_with_tts(res, user_id=user_id)
@@ -297,30 +259,49 @@ async def confirm_pending_endpoint(
 @app.post("/api/cancel", response_model=TextQueryResponse)
 async def cancel_pending_endpoint(
     req: SessionActionRequest = SessionActionRequest(),
-    current_user: Dict[str, Any] = Depends(get_active_user)
+    current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     user_id = int(current_user["id"])
     agent = get_shared_agent()
-    res = agent.cancel_pending(session_id=req.session_id, user_id=user_id)
+    res = await asyncio.to_thread(
+        _call_with_optional_user_id,
+        agent.cancel_pending,
+        session_id=req.session_id,
+        user_id=user_id
+    )
     res["spoken_response"] = format_spoken_response(res)
     get_user_memory(user_id).add_message("assistant", res["spoken_response"])
     return await _build_response_with_tts(res, user_id=user_id)
 
 
-# ==================== СПИСОК ЗАДАЧ, ИСТОРИЯ И КАЛЕНДАРЬ ====================
+@app.get("/api/audio/{filename}")
+async def get_audio_from_ram(filename: str):
+    """Отдаёт MP3-поток напрямую из оперативной памяти."""
+    mp3_bytes = voice_service.get_cached_audio(filename)
+    if mp3_bytes:
+        return Response(
+            content=mp3_bytes,
+            media_type="audio/mpeg",
+            headers={"Cache-Control": "no-store"}
+        )
+    raise HTTPException(status_code=404, detail="Audio not found in memory")
+
+
+# ==================== ЗАДАЧИ, ИСТОРИЯ И КАЛЕНДАРЬ ====================
 
 @app.get("/api/history")
 async def get_history_endpoint(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
-    intent: Optional[str] = Query(None, description="Task, Reminder или Meeting"),
-    status: Optional[str] = Query(None, description="Active или Done"),
-    sort_by: str = Query("created_desc", description="created_desc | type | date"),
-    current_user: Dict[str, Any] = Depends(get_active_user)
+    intent: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    sort_by: str = Query("created_desc"),
+    current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     user_id = int(current_user["id"])
     agent = get_shared_agent()
-    items = agent.db.get_history(
+    items = _call_with_optional_user_id(
+        agent.db.get_history,
         limit=limit,
         offset=offset,
         intent_filter=intent,
@@ -333,15 +314,16 @@ async def get_history_endpoint(
 
 @app.get("/api/tasks")
 async def get_tasks_by_period_endpoint(
-    start_date: str = Query(..., description="YYYY-MM-DD"),
-    end_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
-    intent: Optional[str] = Query(None, description="Task, Reminder или Meeting"),
-    sort_by: str = Query("date", description="date или type"),
-    current_user: Dict[str, Any] = Depends(get_active_user)
+    start_date: str = Query(...),
+    end_date: Optional[str] = Query(None),
+    intent: Optional[str] = Query(None),
+    sort_by: str = Query("date"),
+    current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     user_id = int(current_user["id"])
     agent = get_shared_agent()
-    items = agent.db.get_items_by_period(
+    items = _call_with_optional_user_id(
+        agent.db.get_items_by_period,
         start_date,
         end_date or start_date,
         intent,
@@ -355,11 +337,12 @@ async def get_tasks_by_period_endpoint(
 async def update_task_endpoint(
     task_id: int,
     req: TaskUpdateRequest,
-    current_user: Dict[str, Any] = Depends(get_active_user)
+    current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     user_id = int(current_user["id"])
     agent = get_shared_agent()
-    updated = agent.db.update_item(
+    updated = _call_with_optional_user_id(
+        agent.db.update_item,
         task_id=task_id,
         action=req.action,
         parsed_date=req.parsed_date,
@@ -376,11 +359,11 @@ async def update_task_endpoint(
 @app.post("/api/tasks/{task_id}/done")
 async def mark_task_done_endpoint(
     task_id: int,
-    current_user: Dict[str, Any] = Depends(get_active_user)
+    current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     user_id = int(current_user["id"])
     agent = get_shared_agent()
-    ok = agent.db.mark_done(task_id, user_id=user_id)
+    ok = _call_with_optional_user_id(agent.db.mark_done, task_id, user_id=user_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Task not found")
     return {"status": "ok", "task_id": task_id}
@@ -389,18 +372,18 @@ async def mark_task_done_endpoint(
 @app.delete("/api/tasks/{task_id}")
 async def delete_task_endpoint(
     task_id: int,
-    current_user: Dict[str, Any] = Depends(get_active_user)
+    current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     user_id = int(current_user["id"])
     agent = get_shared_agent()
-    ok = agent.db.delete_item(task_id, user_id=user_id)
+    ok = _call_with_optional_user_id(agent.db.delete_item, task_id, user_id=user_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Task not found")
     return {"status": "deleted", "task_id": task_id}
 
 
 @app.get("/api/notifications")
-async def pop_upcoming_notifications(current_user: Dict[str, Any] = Depends(get_active_user)):
+async def pop_upcoming_notifications(current_user: Dict[str, Any] = Depends(get_current_user)):
     user_id = int(current_user["id"])
     user_queue = _pending_ui_notifications.get(user_id, [])
     items = list(user_queue)
@@ -409,10 +392,11 @@ async def pop_upcoming_notifications(current_user: Dict[str, Any] = Depends(get_
 
 
 @app.get("/api/calendar.ics")
-async def export_ics_calendar(current_user: Dict[str, Any] = Depends(get_active_user)):
+async def export_ics_calendar(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """Генерирует и отдаёт .ics календарь из памяти без сохранения на диск."""
     user_id = int(current_user["id"])
     agent = get_shared_agent()
-    items = agent.db.get_history(limit=200, user_id=user_id)
+    items = _call_with_optional_user_id(agent.db.get_history, limit=200, user_id=user_id)
     ics_text = CalendarIntegration.export_all_to_ics(items)
     return Response(
         content=ics_text,
@@ -421,65 +405,27 @@ async def export_ics_calendar(current_user: Dict[str, Any] = Depends(get_active_
     )
 
 
-@app.get("/api/audio/{filename}")
-async def get_audio(filename: str):
-    file_path = os.path.join(TEMP_DIR, filename)
-    if os.path.exists(file_path):
-        return FileResponse(
-            file_path,
-            media_type="audio/mpeg",
-            headers={"Cache-Control": "no-store"}
-        )
-    raise HTTPException(status_code=404, detail="Audio not found")
-
-
 @app.post("/api/clear-history")
-async def clear_history(current_user: Dict[str, Any] = Depends(get_active_user)):
+async def clear_history(current_user: Dict[str, Any] = Depends(get_current_user)):
     user_id = int(current_user["id"])
     get_user_memory(user_id).clear()
-    get_shared_agent().cancel_pending("default", user_id=user_id)
+    _call_with_optional_user_id(get_shared_agent().cancel_pending, "default", user_id=user_id)
     return {"status": "ok", "message": "History cleared"}
 
 
 FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "static_frontend")
-NO_CACHE_HEADERS = {"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"}
 
 if os.path.exists(FRONTEND_DIR):
+    assets_dir = os.path.join(FRONTEND_DIR, "assets")
+    if os.path.exists(assets_dir):
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
     @app.get("/{full_path:path}")
     async def serve_react_app(full_path: str):
         target = os.path.join(FRONTEND_DIR, full_path)
-        if full_path and os.path.isfile(target):
-            return FileResponse(target, headers=NO_CACHE_HEADERS)
+        if full_path and os.path.exists(target):
+            return FileResponse(target)
         index_file = os.path.join(FRONTEND_DIR, "index.html")
-        if os.path.isfile(index_file):
-            return FileResponse(index_file, headers=NO_CACHE_HEADERS)
+        if os.path.exists(index_file):
+            return FileResponse(index_file)
         return {"message": "Frontend not built yet"}
-
-@app.post("/api/auth/register", response_model=AuthResponse)
-async def register_endpoint(req: AuthRequest):
-    username = req.username.strip()
-    password = req.password
-
-    if len(username) < 2:
-        raise HTTPException(status_code=400, detail="Логин должен содержать минимум 2 символа")
-
-    pwd_error = validate_password_strength(password, username=username)
-    if pwd_error:
-        raise HTTPException(status_code=400, detail=pwd_error)
-
-    agent = get_shared_agent()
-    existing = agent.db.get_user_by_username(username)
-    if existing:
-        raise HTTPException(status_code=409, detail="Пользователь с таким логином уже существует")
-
-    pwd_hash = hash_password(password)
-    created_user = agent.db.create_user(username, pwd_hash)
-    if not created_user:
-        raise HTTPException(status_code=500, detail="Не удалось создать пользователя")
-
-    token = create_access_token(created_user["id"], created_user["username"])
-    return AuthResponse(
-        token=token,
-        user={"id": created_user["id"], "username": created_user["username"]}
-    )
-
