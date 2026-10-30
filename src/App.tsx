@@ -12,7 +12,6 @@ export default function App() {
   return (
     <HashRouter>
       <Routes>
-        {/* Авторизация теперь на главном экране */}
         <Route path="/" element={<AuthPage />} />
         <Route path="/start" element={<StartPage />} />
         <Route path="/menu" element={<MenuPage />} />

@@ -5,7 +5,6 @@ export type VoiceResponse = {
   operation: string
 }
 
-// Отправка аудио на сервер
 export async function recognizeSpeech(audio: Blob): Promise<VoiceResponse> {
   const body = new FormData()
   body.append('file', audio, 'record.webm')

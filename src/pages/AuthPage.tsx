@@ -6,12 +6,11 @@ import './pages.css'
 import './auth.css'
 
 export default function AuthPage() {
-  // true = Авторизация, false = Регистрация
+
   const [isLogin, setIsLogin] = useState(true)
   const [login, setLogin] = useState('')
   const [password, setPassword] = useState('')
-  // ДОБАВЛЕНО: добавили global в типизацию, чтобы TS не ругался
-  const [errors, setErrors] = useState<{ login?: string; password?: string; global?: string }>({})
+  const [errors, setErrors] = useState<{ login?: string; password?: string }>({})
   
   const navigate = useNavigate()
 
@@ -19,10 +18,8 @@ export default function AuthPage() {
     e.preventDefault()
     setErrors({})
     let hasError = false
-    // ДОБАВЛЕНО: добавили global в типизацию объекта
-    const newErrors: { login?: string; password?: string; global?: string } = {}
+    const newErrors: { login?: string; password?: string } = {}
 
-    // Имитация проверок для показа визуальных ошибок
     if (!login.trim()) {
       newErrors.login = 'Неверный формат (пустая строка)'
       hasError = true
@@ -32,20 +29,23 @@ export default function AuthPage() {
       hasError = true
     }
 
-    // Для проверки работы глобальной ошибки:
-    if (login.trim() === 'admin' && password.trim() === 'wrong') {
-      newErrors.global = 'Ошибка авторизации'
-      hasError = true
+    if (!hasError) {
+      if (isLogin && password === 'wrong') {
+        newErrors.password = 'Неверный пароль'
+        hasError = true
+      } else if (!isLogin && login.trim() === 'admin') {
+        newErrors.login = 'Такой логин уже существует'
+        hasError = true
+      }
     }
 
     if (hasError) {
       setErrors(newErrors)
-      if (!login.trim()) setLogin('')
-      if (!password.trim()) setPassword('')
+      if (newErrors.login) setLogin('')
+      if (newErrors.password) setPassword('')
       return
     }
 
-    // Если всё ок — "входим" и перекидываем на экран Start
     navigate('/start')
   }
 
@@ -86,13 +86,6 @@ export default function AuthPage() {
                 className={errors.password ? 'input-error' : ''}
               />
             </div>
-
-            {/* Глобальная ошибка (возвращаем её на место) */}
-            {errors.global && (
-              <div className="auth-error-global">
-                {errors.global}
-              </div>
-            )}
             
             <button type="submit" className="auth-submit">
               {isLogin ? 'Войти' : 'Зарегистрироваться'}

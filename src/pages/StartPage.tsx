@@ -9,7 +9,6 @@ export default function StartPage() {
       <div className="stage">
         <Logo variant="start" />
 
-        {/* Кнопка выхода в правом верхнем углу */}
         <Link 
           to="/" 
           style={{

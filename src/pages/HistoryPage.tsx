@@ -18,12 +18,10 @@ import './pages.css'
 import './history.css'
 
 type Loaded = { key: string; plans: Plan[] | null }
-// Черновик записи, которую сейчас редактируют
 type Draft = { text: string; date: string; time: string; type: PlanType }
 
 const planTypes = Object.keys(planTypeLabels) as PlanType[]
 
-// Общий вид полей и кнопок на этом экране
 const controlStyle: CSSProperties = {
   fontFamily: 'inherit',
   fontSize: '11px',
@@ -34,7 +32,6 @@ const controlStyle: CSSProperties = {
 const buttonStyle: CSSProperties = { ...controlStyle, padding: '4px 8px', cursor: 'pointer' }
 const smallButtonStyle: CSSProperties = { ...controlStyle, padding: '2px 5px', cursor: 'pointer' }
 
-// Цвет подписи типа записи
 const typeColors: Record<PlanType, string> = {
   task: '#555',
   meeting: '#24316c',
@@ -52,7 +49,7 @@ export default function HistoryPage() {
 
   const [searchInput, setSearchInput] = useState(query)
   const [result, setResult] = useState<Loaded | null>(null)
-  const [reloads, setReloads] = useState(0) // растёт после изменений, чтобы перечитать список
+  const [reloads, setReloads] = useState(0) 
   const [editingId, setEditingId] = useState<number | null>(null)
   const [draft, setDraft] = useState<Draft>({ text: '', date: '', time: '', type: 'task' })
   const [actionFailed, setActionFailed] = useState(false)
@@ -105,8 +102,7 @@ export default function HistoryPage() {
     setSearchInput('')
     setSearchParams({})
   }
-
-  // Выполняет действие с записью и перечитывает список. Возвращает true, если всё получилось
+  
   async function runAction(action: () => Promise<void>): Promise<boolean> {
     try {
       await action()

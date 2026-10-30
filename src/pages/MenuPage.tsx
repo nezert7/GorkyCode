@@ -68,8 +68,6 @@ export default function MenuPage() {
     }
   }
 
-  // Кнопка "сохранить": если запрос был неполным (clarify), сначала просим LLM
-  // проставить дефолты, а затем подтверждаем сохранение в БД
   async function handleContinue() {
     if (busy) return
     setBusy(true)
@@ -88,7 +86,6 @@ export default function MenuPage() {
     }
   }
 
-  // Кнопка "продолжить": снова включает микрофон без сброса контекста на сервере
   async function handleReply() {
     if (busy) return
     setBusy(true)
@@ -102,13 +99,11 @@ export default function MenuPage() {
     }
   }
 
-  // Кнопка "отменить": сбрасывает несохраненный контекст на сервере
   async function handleCancel() {
     setMode('idle')
     try {
       await cancelPending()
     } catch {
-      // если сервер не ответил, пользователю это знать не нужно
     }
   }
 
