@@ -127,7 +127,6 @@ pip install -r requirements.txt
 ```env
 # Авторизация и модель GigaChat
 GIGACHAT_CREDENTIALS=ваш_ключ_авторизации_GigaChat_в_Base64
-GIGACHAT_SCOPE=GIGACHAT_API_PERS
 GIGACHAT_MODEL=GigaChat-3-Ultra
 
 # Облачная база данных Turso (опционально; без этих переменных используется БД в ОЗУ)
