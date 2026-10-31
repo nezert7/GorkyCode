@@ -1,8 +1,8 @@
 import os
-import sys
 import time
 import asyncio
 import threading
+import sys
 from typing import Optional, Dict, Any, List
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -45,6 +45,7 @@ def get_user_memory(user_id: int) -> MemoryManager:
 
 
 def _background_notification_worker():
+    """каждые 30 сек проверяет задачи за 1 час до начала"""
     while True:
         try:
             agent = get_shared_agent()
@@ -65,6 +66,8 @@ def _background_notification_worker():
 
 threading.Thread(target=_background_notification_worker, daemon=True).start()
 
+
+# МОДЕЛИ ДАННЫХ
 
 class AuthRequest(BaseModel):
     username: str
@@ -105,6 +108,8 @@ class TextQueryResponse(BaseModel):
     error_code: Optional[str] = None
     hint: Optional[str] = None
 
+
+# АВТОРИЗАЦИЯ
 
 @app.post("/api/auth/register", response_model=AuthResponse)
 async def register_endpoint(req: AuthRequest):
@@ -149,16 +154,14 @@ async def me_endpoint(current_user: Dict[str, Any] = Depends(get_current_user)):
     return {"user": current_user}
 
 
-async def _build_response_with_tts(
-    turn_result: Dict[str, Any], user_id: int, skip_tts: bool = False
-) -> TextQueryResponse:
-    spoken_text = turn_result.get("spoken_response") or format_spoken_response(turn_result)
-    audio_url = None
+#  IN-MEMORY ГОЛОС И ЧАТ
 
-    if not skip_tts:
-        audio_key = f"reply_u{user_id}.mp3"
-        saved_key = await voice_service.text_to_speech_in_memory(spoken_text, audio_key)
-        audio_url = f"/api/audio/{saved_key}" if saved_key else None
+async def _build_response_with_tts(turn_result: Dict[str, Any], user_id: int) -> TextQueryResponse:
+    spoken_text = turn_result.get("spoken_response") or format_spoken_response(turn_result)
+    audio_key = f"reply_u{user_id}.mp3"
+
+    saved_key = await voice_service.text_to_speech_in_memory(spoken_text, audio_key)
+    audio_url = f"/api/audio/{saved_key}" if saved_key else None
 
     return TextQueryResponse(
         response=spoken_text,
@@ -188,9 +191,7 @@ async def chat_endpoint(
     user_text = data.query.strip()
     mem = get_user_memory(user_id)
 
-    is_silent_default_fill = "оставь как есть" in user_text.lower() or "по умолчанию" in user_text.lower()
-
-    if user_text and not is_silent_default_fill:
+    if user_text:
         mem.add_message("user", user_text)
 
     turn_result = await asyncio.to_thread(
@@ -203,10 +204,9 @@ async def chat_endpoint(
     )
 
     assistant_reply = turn_result["spoken_response"]
-    if not is_silent_default_fill:
-        mem.add_message("assistant", assistant_reply)
+    mem.add_message("assistant", assistant_reply)
 
-    return await _build_response_with_tts(turn_result, user_id=user_id, skip_tts=is_silent_default_fill)
+    return await _build_response_with_tts(turn_result, user_id=user_id)
 
 
 @app.post("/api/voice-chat", response_model=TextQueryResponse)
@@ -277,6 +277,8 @@ async def get_audio_from_ram(filename: str):
     raise HTTPException(status_code=404, detail="Audio not found in memory")
 
 
+#  ЗАДАЧИ, ИСТОРИЯ И КАЛЕНДАРЬ
+
 @app.get("/api/history")
 async def get_history_endpoint(
     limit: int = Query(50, ge=1, le=1000),
@@ -294,6 +296,20 @@ async def get_history_endpoint(
         status_filter=status,
         sort_by=sort_by,
         user_id=user_id
+    )
+    return {"items": items}
+
+
+@app.get("/api/search")
+async def search_endpoint(
+    q: str = Query("", max_length=200),
+    limit: int = Query(50, ge=1, le=500),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Поиск записей по тексту, дате и времени (строка поиска в интерфейсе)."""
+    user_id = int(current_user["id"])
+    items = await asyncio.to_thread(
+        get_shared_agent().db.search_for_ui, q, limit, user_id
     )
     return {"items": items}
 
@@ -362,6 +378,28 @@ async def delete_task_endpoint(
     return {"status": "deleted", "task_id": task_id}
 
 
+class NotificationsAckRequest(BaseModel):
+    ids: List[int] = []
+
+
+@app.post("/api/ack")
+async def ack_screen_endpoint(
+    req: SessionActionRequest = SessionActionRequest(),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Интерфейс вызывает после экрана «сохранено»; состояния на сервере сбрасывать не нужно."""
+    return {"status": "ok"}
+
+
+@app.post("/api/notifications/ack")
+async def ack_notifications_endpoint(
+    req: NotificationsAckRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Очередь уведомлений очищается при чтении, поэтому подтверждение только отвечает «ок»."""
+    return {"status": "ok", "acked": len(req.ids)}
+
+
 @app.get("/api/notifications")
 async def pop_upcoming_notifications(current_user: Dict[str, Any] = Depends(get_current_user)):
     user_id = int(current_user["id"])
@@ -389,7 +427,6 @@ async def clear_history(current_user: Dict[str, Any] = Depends(get_current_user)
     get_user_memory(user_id).clear()
     get_shared_agent().cancel_pending("default", user_id=user_id)
     return {"status": "ok", "message": "History cleared"}
-
 
 BASE_DIR = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
 FRONTEND_DIR = os.path.join(BASE_DIR, "static_frontend")
