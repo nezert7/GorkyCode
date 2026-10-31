@@ -95,7 +95,6 @@
   text-align: center;
 }
 
-/* Поле пароля с кнопкой-глазиком внутри */
 .auth-password {
   position: relative;
   flex: 1;
@@ -104,7 +103,7 @@
 
 .auth-password input {
   width: 100%;
-  padding-right: calc(var(--u) * 48);
+  padding-right: calc(var(--u) * 42);
 }
 
 .auth-eye {
@@ -112,8 +111,8 @@
   top: 50%;
   right: calc(var(--u) * 8);
   transform: translateY(-50%);
-  width: calc(var(--u) * 33);
-  height: calc(var(--u) * 22);
+  width: calc(var(--u) * 27);
+  height: calc(var(--u) * 18);
   padding: 0;
   border: 0;
   background: none;
