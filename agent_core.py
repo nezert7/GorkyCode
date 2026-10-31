@@ -28,9 +28,10 @@ def format_date_ru(date_str: Optional[str]) -> str:
 
 class RussianDateTimeExtractor:
     """
-    Точное извлечение дат и времени из русской речи:
+    Точное извлечение дат, времени и относительных интервалов из русской речи:
+    - «через 2 часа», «через 5 часов», «через полчаса», «через 45 минут», «через 3 дня» -> точная дата + время.
     - «12 часов ночи» -> 00:00, «12 часов дня» -> 12:00.
-    - Реальные прошедшие даты текущего года (например, 15 февраля) переносятся на 2027 год.
+    - Реальные прошедшие даты текущего года (например, 15 февраля) переносятся на следующий год.
     - Любые несуществующие даты (31 февраля, 31 ноября, 31 апреля, 29 февраля) строго блокируются и требуют уточнения.
     """
 
@@ -51,6 +52,22 @@ class RussianDateTimeExtractor:
         "два": 2, "двух": 2, "второго": 2,
         "час": 1, "один": 1, "одного": 1, "первого": 1,
         "ноль": 0
+    }
+
+    RELATIVE_NUMBERS = {
+        "один": 1, "одну": 1, "одного": 1, "час": 1,
+        "два": 2, "две": 2, "двух": 2, "пару": 2, "пара": 2,
+        "три": 3, "трех": 3, "трёх": 3,
+        "четыре": 4, "четырех": 4, "четырёх": 4,
+        "пять": 5, "пяти": 5,
+        "шесть": 6, "шести": 6,
+        "семь": 7, "семи": 7,
+        "восемь": 8, "восьми": 8,
+        "девять": 9, "девяти": 9,
+        "десять": 10, "десяти": 10,
+        "одиннадцать": 11, "двенадцать": 12,
+        "пятнадцать": 15, "двадцать": 20, "тридцать": 30,
+        "сорок": 40, "сорок пять": 45, "пятьдесят": 50
     }
 
     WORD_DAYS = [
@@ -94,7 +111,6 @@ class RussianDateTimeExtractor:
         "субботу": 5, "суббота": 5, "воскресенье": 6
     }
 
-    # Порядок ключей важен: "март" проверяется раньше "ма" (май)
     MONTHS_LIST = [
         ("январ", 1), ("феврал", 2), ("март", 3), ("апрел", 4), ("ма", 5), ("июн", 6),
         ("июл", 7), ("август", 8), ("сентябр", 9), ("октябр", 10), ("ноябр", 11), ("декабр", 12)
@@ -115,13 +131,10 @@ class RussianDateTimeExtractor:
 
     @classmethod
     def _normalize_word_days_before_months(cls, text: str) -> str:
-        """Превращает числительные словами рядом с месяцами в цифры («тридцать первого февраля» -> «31 февраля»)."""
         res = text
         for word_pat, day_num in cls.WORD_DAYS:
-            # «тридцать первого [числа] февраля» -> «31 февраля»
             pat_before = rf"\b(?:{word_pat})\s+(?:числ[аоуе]?\s+)?{cls.MONTH_REGEX_PART}\b"
             res = re.sub(pat_before, rf"{day_num} \1", res, flags=re.IGNORECASE)
-            # «в феврале тридцать первого [числа]» -> «31 февраля»
             pat_after = rf"\b(?:в|на)\s+{cls.MONTH_REGEX_PART}\s+(?:{word_pat})(?:\s+числ[аоуе]?)?\b"
             res = re.sub(pat_after, rf"{day_num} \1", res, flags=re.IGNORECASE)
         return res
@@ -142,20 +155,101 @@ class RussianDateTimeExtractor:
 
     @staticmethod
     def _resolve_year_for_month_day(month: int, day: int, explicit_year: Optional[int], now: datetime) -> datetime:
-        """
-        Проверяет существование даты и вычисляет год.
-        Если такой даты (например, 31 февраля, 31 ноября, 29 февраля) нет в календаре —
-        НЕ переносит на другой год, а сразу выбрасывает ValueError для запроса уточнения у пользователя.
-        """
         if explicit_year is not None:
             return datetime(explicit_year, month, day)
 
-        # Сначала строго проверяем, существует ли эта дата в текущем году
         candidate = datetime(now.year, month, day)
-        # Если дата реально существует, но в этом году уже прошла (например, 15 февраля) — ставим следующий год
         if candidate.date() < now.date():
             return datetime(now.year + 1, month, day)
         return candidate
+
+    @classmethod
+    def _extract_relative_offset(cls, clean: str, now: datetime) -> Tuple[Optional[str], Optional[str], str]:
+        """
+        Распознаёт и вырезает из текста относительные конструкции:
+        - «через полчаса», «через полтора часа»
+        - «через 2 часа», «через пять часов», «через час»
+        - «через 30 минут», «через минуту»
+        - «через 2 часа 30 минут»
+        - «через 3 дня», «через две недели», «через месяц»
+        """
+        lower = clean.lower()
+
+        m_half = re.search(r"\bчерез\s+пол\s*часа\b", lower)
+        if m_half:
+            target = now + timedelta(minutes=30)
+            new_clean = clean[:m_half.start()] + " " + clean[m_half.end():]
+            return target.strftime("%Y-%m-%d"), target.strftime("%H:%M"), new_clean
+
+        m_15h = re.search(r"\bчерез\s+полтора\s+часа\b", lower)
+        if m_15h:
+            target = now + timedelta(minutes=90)
+            new_clean = clean[:m_15h.start()] + " " + clean[m_15h.end():]
+            return target.strftime("%Y-%m-%d"), target.strftime("%H:%M"), new_clean
+
+        m_combo = re.search(
+            r"\bчерез\s+(\d+)\s*час(?:а|ов)?\s*(?:и\s*)?(\d+)\s*минут[ыу]?\b",
+            lower
+        )
+        if m_combo:
+            h_delta = int(m_combo.group(1))
+            m_delta = int(m_combo.group(2))
+            target = now + timedelta(hours=h_delta, minutes=m_delta)
+            new_clean = clean[:m_combo.start()] + " " + clean[m_combo.end():]
+            return target.strftime("%Y-%m-%d"), target.strftime("%H:%M"), new_clean
+
+        num_words_pat = "|".join(sorted(cls.RELATIVE_NUMBERS.keys(), key=len, reverse=True))
+        m_hours = re.search(
+            rf"\bчерез\s+(?:(\d+|{num_words_pat})\s+)?час(?:а|ов|ик|ика)?\b",
+            lower
+        )
+        if m_hours:
+            raw_num = (m_hours.group(1) or "1").strip()
+            h_delta = int(raw_num) if raw_num.isdigit() else cls.RELATIVE_NUMBERS.get(raw_num, 1)
+            target = now + timedelta(hours=h_delta)
+            new_clean = clean[:m_hours.start()] + " " + clean[m_hours.end():]
+            return target.strftime("%Y-%m-%d"), target.strftime("%H:%M"), new_clean
+
+        m_mins = re.search(
+            rf"\bчерез\s+(?:(\d+|{num_words_pat})\s+)?минут[уы]?\b",
+            lower
+        )
+        if m_mins:
+            raw_num = (m_mins.group(1) or "1").strip()
+            m_delta = int(raw_num) if raw_num.isdigit() else cls.RELATIVE_NUMBERS.get(raw_num, 1)
+            target = now + timedelta(minutes=m_delta)
+            new_clean = clean[:m_mins.start()] + " " + clean[m_mins.end():]
+            return target.strftime("%Y-%m-%d"), target.strftime("%H:%M"), new_clean
+
+        m_days = re.search(
+            rf"\bчерез\s+(?:(\d+|{num_words_pat})\s+)?(?:дн(?:я|ей)|день|суток|сутки)\b",
+            lower
+        )
+        if m_days:
+            raw_num = (m_days.group(1) or "1").strip()
+            d_delta = int(raw_num) if raw_num.isdigit() else cls.RELATIVE_NUMBERS.get(raw_num, 1)
+            target = now + timedelta(days=d_delta)
+            new_clean = clean[:m_days.start()] + " " + clean[m_days.end():]
+            return target.strftime("%Y-%m-%d"), None, new_clean
+
+        m_weeks = re.search(
+            rf"\bчерез\s+(?:(\d+|{num_words_pat})\s+)?недел[юиь]\b",
+            lower
+        )
+        if m_weeks:
+            raw_num = (m_weeks.group(1) or "1").strip()
+            w_delta = int(raw_num) if raw_num.isdigit() else cls.RELATIVE_NUMBERS.get(raw_num, 1)
+            target = now + timedelta(days=7 * w_delta)
+            new_clean = clean[:m_weeks.start()] + " " + clean[m_weeks.end():]
+            return target.strftime("%Y-%m-%d"), None, new_clean
+
+        m_month = re.search(r"\bчерез\s+месяц\b", lower)
+        if m_month:
+            target = now + timedelta(days=30)
+            new_clean = clean[:m_month.start()] + " " + clean[m_month.end():]
+            return target.strftime("%Y-%m-%d"), None, new_clean
+
+        return None, None, clean
 
     @classmethod
     def extract_date_and_time_full(
@@ -165,30 +259,36 @@ class RussianDateTimeExtractor:
         Возвращает: (parsed_date, parsed_time, clean_text_without_datetime, invalid_date_error).
         """
         clean = cls._normalize_word_days_before_months(text)
-        lower = clean.lower()
-        parsed_time: Optional[str] = None
         parsed_date: Optional[str] = None
+        parsed_time: Optional[str] = None
         invalid_date_str: Optional[str] = None
 
-        # 0. Явный перехват «12 часов ночи» / «полночь» -> 00:00 и «12 часов дня» / «полдень» -> 12:00
-        midnight_m = re.search(
-            r"\b(?:в|на|к)?\s*(?:12|двенадцат[ьи])\s*(?:час(?:а|ов|у)?\s*)?ночи\b|\b(?:в|на)?\s*полночь\b",
-            lower
-        )
-        noon_m = re.search(
-            r"\b(?:в|на|к)?\s*(?:12|двенадцат[ьи])\s*(?:час(?:а|ов|у)?\s*)?дня\b|\b(?:в|на)?\s*полдень\b",
-            lower
-        )
-        if midnight_m:
-            parsed_time = "00:00"
-            clean = clean[:midnight_m.start()] + " " + clean[midnight_m.end():]
-            lower = clean.lower()
-        elif noon_m:
-            parsed_time = "12:00"
-            clean = clean[:noon_m.start()] + " " + clean[noon_m.end():]
-            lower = clean.lower()
+        rel_date, rel_time, clean = cls._extract_relative_offset(clean, now)
+        if rel_date:
+            parsed_date = rel_date
+        if rel_time:
+            parsed_time = rel_time
 
-        # 1. Время в формате HH:MM или HH.MM
+        lower = clean.lower()
+
+        if not parsed_time:
+            midnight_m = re.search(
+                r"\b(?:в|на|к)?\s*(?:12|двенадцат[ьи])\s*(?:час(?:а|ов|у)?\s*)?ночи\b|\b(?:в|на)?\s*полночь\b",
+                lower
+            )
+            noon_m = re.search(
+                r"\b(?:в|на|к)?\s*(?:12|двенадцат[ьи])\s*(?:час(?:а|ов|у)?\s*)?дня\b|\b(?:в|на)?\s*полдень\b",
+                lower
+            )
+            if midnight_m:
+                parsed_time = "00:00"
+                clean = clean[:midnight_m.start()] + " " + clean[midnight_m.end():]
+                lower = clean.lower()
+            elif noon_m:
+                parsed_time = "12:00"
+                clean = clean[:noon_m.start()] + " " + clean[noon_m.end():]
+                lower = clean.lower()
+
         if not parsed_time:
             tm = re.search(
                 r"(?:(?:\bв|\bна|\bк)\s+)?\b([0-2]?\d)[:.]([0-5]\d)(?!\.\d{2,4})\b(?:\s*(утра|вечера|дня|ночи))?",
@@ -204,7 +304,6 @@ class RussianDateTimeExtractor:
                         clean = clean[:tm.start()] + " " + clean[tm.end():]
                         lower = clean.lower()
 
-        # 2. «в половине <часа>»
         if not parsed_time:
             half_m = re.search(r"\b(?:в\s+)?половине\s+([а-яё]+)(?:\s+(утра|дня|вечера|ночи))?", lower)
             if half_m and half_m.group(1) in cls.WORD_HOURS:
@@ -223,47 +322,44 @@ class RussianDateTimeExtractor:
                 clean = clean[:half_m.start()] + " " + clean[half_m.end():]
                 lower = clean.lower()
 
-        # 3. Даты с названием месяца («31 февраля», «31 ноября», «15 февраля», «в феврале 31 числа»)
-        # Важно: проверяем даты с месяцем ДО одиночных часовых чисел, чтобы «на 31 февраля» не приняло 31 за часы
-        month_m = re.search(
-            rf"(?:\b(?:на|в)\s+)?\b(\d{{1,2}})\s+(?:числ[аоуе]?\s+)?{cls.MONTH_REGEX_PART}(?:\s+(\d{{4}})\s*(?:год[ау]?|г\.?)?)?\b",
-            lower
-        )
-        if not month_m:
-            month_m_rev = re.search(
-                rf"\b(?:в|на)\s+{cls.MONTH_REGEX_PART}\s+(\d{{1,2}})(?:\s*числ[аоуе]?)?(?:\s+(\d{{4}})\s*(?:год[ау]?|г\.?)?)?\b",
+        if not parsed_date:
+            month_m = re.search(
+                rf"(?:\b(?:на|в)\s+)?\b(\d{{1,2}})\s+(?:числ[аоуе]?\s+)?{cls.MONTH_REGEX_PART}(?:\s+(\d{{4}})\s*(?:год[ау]?|г\.?)?)?\b",
                 lower
             )
-        else:
             month_m_rev = None
+            if not month_m:
+                month_m_rev = re.search(
+                    rf"\b(?:в|на)\s+{cls.MONTH_REGEX_PART}\s+(\d{{1,2}})(?:\s*числ[аоуе]?)?(?:\s+(\d{{4}})\s*(?:год[ау]?|г\.?)?)?\b",
+                    lower
+                )
 
-        if month_m or month_m_rev:
-            if month_m:
-                d = int(month_m.group(1))
-                m_word = month_m.group(2)
-                explicit_y = int(month_m.group(3)) if month_m.group(3) else None
-                span_start, span_end = month_m.start(), month_m.end()
-            else:
-                m_word = month_m_rev.group(1)
-                d = int(month_m_rev.group(2))
-                explicit_y = int(month_m_rev.group(3)) if month_m_rev.group(3) else None
-                span_start, span_end = month_m_rev.start(), month_m_rev.end()
+            if month_m or month_m_rev:
+                if month_m:
+                    d = int(month_m.group(1))
+                    m_word = month_m.group(2)
+                    explicit_y = int(month_m.group(3)) if month_m.group(3) else None
+                    span_start, span_end = month_m.start(), month_m.end()
+                else:
+                    m_word = month_m_rev.group(1)
+                    d = int(month_m_rev.group(2))
+                    explicit_y = int(month_m_rev.group(3)) if month_m_rev.group(3) else None
+                    span_start, span_end = month_m_rev.start(), month_m_rev.end()
 
-            m_num = cls._match_month_number(m_word)
-            raw_matched_date = f"{d} {m_word}"
-            clean = clean[:span_start] + " " + clean[span_end:]
-            lower = clean.lower()
+                m_num = cls._match_month_number(m_word)
+                raw_matched_date = f"{d} {m_word}"
+                clean = clean[:span_start] + " " + clean[span_end:]
+                lower = clean.lower()
 
-            if m_num is None:
-                invalid_date_str = raw_matched_date
-            else:
-                try:
-                    dt = cls._resolve_year_for_month_day(m_num, d, explicit_y, now)
-                    parsed_date = dt.strftime("%Y-%m-%d")
-                except ValueError:
+                if m_num is None:
                     invalid_date_str = raw_matched_date
+                else:
+                    try:
+                        dt = cls._resolve_year_for_month_day(m_num, d, explicit_y, now)
+                        parsed_date = dt.strftime("%Y-%m-%d")
+                    except ValueError:
+                        invalid_date_str = raw_matched_date
 
-        # 4. Даты формата DD.MM(.YYYY)
         if not parsed_date and not invalid_date_str:
             dm_match = re.search(r"(?:\bна\s+)?\b(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?\b", lower)
             if dm_match:
@@ -278,7 +374,6 @@ class RussianDateTimeExtractor:
                 except ValueError:
                     invalid_date_str = raw_matched_date
 
-        # 5. Время цифрами: «в 15 часов», «в 3 часа дня», «в 12 ночи», «в 7 вечера»
         if not parsed_time:
             hm = re.search(
                 r"\b(?:(?:в|на|к)\s+([0-2]?\d)\s*(?:час(?:а|ов|у)?)?(?:\s*(утра|вечера|дня|ночи))?|"
@@ -295,7 +390,6 @@ class RussianDateTimeExtractor:
                     clean = clean[:hm.start()] + " " + clean[hm.end():]
                     lower = clean.lower()
 
-        # 6. Время словами: «в три часа дня», «в час ночи», «в двенадцать ночи»
         if not parsed_time:
             for word, h_val in sorted(cls.WORD_HOURS.items(), key=lambda x: -len(x[0])):
                 pat = (
@@ -312,7 +406,6 @@ class RussianDateTimeExtractor:
                         lower = clean.lower()
                         break
 
-        # 7. Относительные даты: послезавтра, завтра, сегодня, вчера, через неделю
         if not parsed_date and not invalid_date_str:
             if re.search(r"\b(?:на\s+)?послезавтра\b", lower):
                 parsed_date = (now + timedelta(days=2)).strftime("%Y-%m-%d")
@@ -326,11 +419,7 @@ class RussianDateTimeExtractor:
             elif re.search(r"\b(?:на\s+)?вчера\b", lower):
                 parsed_date = (now - timedelta(days=1)).strftime("%Y-%m-%d")
                 clean = re.sub(r"\b(?:на\s+)?вчера\b", " ", clean, flags=re.IGNORECASE)
-            elif re.search(r"\bчерез\s+неделю\b", lower):
-                parsed_date = (now + timedelta(days=7)).strftime("%Y-%m-%d")
-                clean = re.sub(r"\bчерез\s+неделю\b", " ", clean, flags=re.IGNORECASE)
 
-        # 8. Дни недели: «в пятницу», «на субботу»
         if not parsed_date and not invalid_date_str:
             for day_word, target_wd in cls.WEEKDAYS_MAP.items():
                 wd_m = re.search(rf"\b(?:в|во|на)\s+(?:следующ[уюийе]+\s+)?{day_word}\b", clean.lower())
@@ -339,6 +428,13 @@ class RussianDateTimeExtractor:
                     parsed_date = (now + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
                     clean = clean[:wd_m.start()] + " " + clean[wd_m.end():]
                     break
+
+        if parsed_time and not parsed_date and not invalid_date_str:
+            now_hm = now.strftime("%H:%M")
+            if parsed_time > now_hm:
+                parsed_date = now.strftime("%Y-%m-%d")
+            else:
+                parsed_date = (now + timedelta(days=1)).strftime("%Y-%m-%d")
 
         clean = re.sub(r"\b\d{4}\s*(?:год[ау]?|г\.?)\b", " ", clean, flags=re.IGNORECASE)
         clean = re.sub(r"\s+", " ", clean).strip(" ,.-?!")
@@ -545,8 +641,8 @@ class RegexFallbackParser:
         clean = re.sub(r"\b(?<!на\s)(?<!про\s)встречу\s*$", " ", clean, flags=re.IGNORECASE)
         for _ in range(3):
             clean = re.sub(cls.PARASITE_WORDS, " ", clean, flags=re.IGNORECASE)
-        clean = re.sub(r"^(?:на|в|к|про|о|об|мне)\s+", "", clean.strip(), flags=re.IGNORECASE)
-        clean = re.sub(r"\b(?:на|в|к)\s*$", "", clean.strip(), flags=re.IGNORECASE)
+        clean = re.sub(r"^(?:на|в|к|про|о|об|мне|что\s+надо|что\s+нужно|чтобы)\s+", "", clean.strip(), flags=re.IGNORECASE)
+        clean = re.sub(r"\b(?:на|в|к|через)\s*$", "", clean.strip(), flags=re.IGNORECASE)
         clean = re.sub(r"\s+", " ", clean).strip(" ,.-?!")
         if not clean:
             return None
@@ -684,6 +780,7 @@ def _env_float(name: str, default: float) -> float:
 
 
 class GigaChatClient:
+    """Клиент GigaChat: использует GIGACHAT_MODEL (GigaChat-3-Ultra) и GIGACHAT_CREDENTIALS напрямую из .env."""
 
     OAUTH_URL = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
     CHAT_URL = "https://api.giga.chat/v1/chat/completions"
@@ -731,10 +828,16 @@ class GigaChatClient:
 
     def complete_json(self, system_prompt: str, user_text: str) -> Optional[Dict[str, Any]]:
         token = self._ensure_token()
+        extra_instruction = (
+            "\nДОПОЛНИТЕЛЬНОЕ ПРАВИЛО ДЛЯ ОТНОСИТЕЛЬНОГО ВРЕМЕНИ: если пользователь говорит "
+            "«через N часов», «через N минут» или «через полчаса», прибавь этот интервал к текущему "
+            "времени из начала промпта, обязательно укажи вычисленные 'date' (YYYY-MM-DD) и 'time' (HH:MM), "
+            "поставь 'operation': 'create', а из поля 'action' полностью удали слова «через N часов/минут»!"
+        )
         payload = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": system_prompt},
+                {"role": "system", "content": system_prompt + extra_instruction},
                 {"role": "user", "content": f"Текст: {user_text}"}
             ],
             "temperature": 0.0,
@@ -747,7 +850,6 @@ class GigaChatClient:
             resp = self._post_chat(self._ensure_token(), payload)
 
         if resp.status_code != 200:
-            # без этого лога ошибка модели или тарифа выглядит как «тихий» переход на RegEx
             print(f"[GigaChat] HTTP {resp.status_code} для модели {self.model}: {resp.text[:200]}")
             return None
 
@@ -775,7 +877,7 @@ class VoronaAgentCore:
         self.gigachat = GigaChatClient(gigachat_creds, gigachat_scope) if gigachat_creds else None
 
         if self.gigachat:
-            print("🔑 [LLM] Подключен провайдер: GigaChat")
+            print(f"🔑 [LLM] Подключен провайдер: GigaChat ({self.gigachat.model})")
         else:
             print("⚠️ [LLM] Ключ GigaChat не задан, работает локальный RegEx-парсер.")
 
@@ -898,8 +1000,14 @@ class VoronaAgentCore:
         if not self.gigachat:
             return None
         try:
-            active_items = self.db.get_history(limit=20, status_filter="Active", sort_by="date", user_id=user_id)
-            sys_prompt = build_system_prompt(now, active_items=active_items)
+            try:
+                active_items = self.db.get_history(limit=20, status_filter="Active", sort_by="date", user_id=user_id)
+            except TypeError:
+                active_items = self.db.get_history(limit=20, status_filter="Active", sort_by="date")
+            try:
+                sys_prompt = build_system_prompt(now, active_items=active_items)
+            except TypeError:
+                sys_prompt = build_system_prompt(now)
             return self.gigachat.complete_json(sys_prompt, raw_text)
         except Exception as exc:
             print(f"⚠️ [GigaChat] Ошибка ({type(exc).__name__}), использую RegEx.")
@@ -970,8 +1078,6 @@ class VoronaAgentCore:
         else:
             combined_input = clean_input
 
-        # Если обнаружена несуществующая дата («31 февраля», «31 ноября»), передаём в LLM текст БЕЗ неё,
-        # чтобы LLM не подменила «31 февраля» на «31 октября» или «28 февраля»!
         llm_query_text = clean_input_no_dt if invalid_date_new else combined_input
 
         parse_method = "llm"
@@ -1001,7 +1107,10 @@ class VoronaAgentCore:
                 start_d = self._validate_calendar_date(parsed_data.get("date")) or today_str
                 end_d = self._validate_calendar_date(parsed_data.get("end_date")) or start_d
                 intent_filter = parsed_data.get("intent")
-                items = self.db.get_items_by_period(start_d, end_d, intent_filter, user_id=user_id)
+                try:
+                    items = self.db.get_items_by_period(start_d, end_d, intent_filter, user_id=user_id)
+                except TypeError:
+                    items = self.db.get_items_by_period(start_d, end_d, intent_filter)
                 return {
                     "ui_status": "Список событий",
                     "operation": "list_period",
@@ -1013,7 +1122,10 @@ class VoronaAgentCore:
 
             if operation == "search":
                 query = parsed_data.get("search_query") or parsed_data.get("action") or clean_input
-                found = self.db.search_past_items(query, user_id=user_id)
+                try:
+                    found = self.db.search_past_items(query, user_id=user_id)
+                except TypeError:
+                    found = self.db.search_past_items(query)
                 return {
                     "ui_status": "Результаты поиска",
                     "operation": "search",
@@ -1024,9 +1136,12 @@ class VoronaAgentCore:
 
             if operation == "delete":
                 query = parsed_data.get("search_query") or parsed_data.get("action") or clean_input
-                deleted_item = self.db.find_and_delete_by_query(
-                    query, target_id=parsed_data.get("target_id"), user_id=user_id
-                )
+                try:
+                    deleted_item = self.db.find_and_delete_by_query(
+                        query, target_id=parsed_data.get("target_id"), user_id=user_id
+                    )
+                except TypeError:
+                    deleted_item = self.db.find_and_delete_by_query(query)
                 return {
                     "ui_status": "Удалено" if deleted_item else "Не найдено",
                     "operation": "delete",
@@ -1037,9 +1152,12 @@ class VoronaAgentCore:
 
             if operation == "complete":
                 query = parsed_data.get("search_query") or parsed_data.get("action") or clean_input
-                completed_item = self.db.find_and_complete_by_query(
-                    query, target_id=parsed_data.get("target_id"), user_id=user_id
-                )
+                try:
+                    completed_item = self.db.find_and_complete_by_query(
+                        query, target_id=parsed_data.get("target_id"), user_id=user_id
+                    )
+                except TypeError:
+                    completed_item = self.db.find_and_complete_by_query(query)
                 return {
                     "ui_status": "Выполнено" if completed_item else "Не найдено",
                     "operation": "complete",
@@ -1057,9 +1175,14 @@ class VoronaAgentCore:
                 new_time = dt_time_new or self._validate_time(parsed_data.get("time"))
                 new_intent = parsed_data.get("intent") if parsed_data.get("intent") in VALID_INTENTS else None
 
-                target_item = self.db.find_best_matching_item(
-                    query_text=query, target_id=target_id, intent_hint=intent_hint, only_active=True, user_id=user_id
-                )
+                if hasattr(self.db, "find_best_matching_item"):
+                    target_item = self.db.find_best_matching_item(
+                        query_text=query, target_id=target_id, intent_hint=intent_hint, only_active=True, user_id=user_id
+                    )
+                else:
+                    candidates = self.db.search_past_items(query, top_k=1, only_active=True)
+                    target_item = candidates[0] if candidates else None
+
                 if not target_item:
                     return {
                         "ui_status": "Не найдено",
@@ -1077,14 +1200,23 @@ class VoronaAgentCore:
                     new_action = None
 
                 self.rollback_buffer[session_key] = dict(target_item)
-                updated_item = self.db.update_item(
-                    task_id=target_item["id"],
-                    action=new_action if new_action else None,
-                    parsed_date=new_date if new_date is not None else "__UNSET__",
-                    parsed_time=new_time if new_time is not None else "__UNSET__",
-                    intent=new_intent,
-                    user_id=user_id
-                )
+                try:
+                    updated_item = self.db.update_item(
+                        task_id=target_item["id"],
+                        action=new_action if new_action else None,
+                        parsed_date=new_date if new_date is not None else "__UNSET__",
+                        parsed_time=new_time if new_time is not None else "__UNSET__",
+                        intent=new_intent,
+                        user_id=user_id
+                    )
+                except TypeError:
+                    updated_item = self.db.update_item(
+                        task_id=target_item["id"],
+                        action=new_action if new_action else None,
+                        parsed_date=new_date if new_date is not None else "__UNSET__",
+                        parsed_time=new_time if new_time is not None else "__UNSET__",
+                        intent=new_intent
+                    )
                 return {
                     "ui_status": "Обновлено" if updated_item else "Не найдено",
                     "operation": "update",
@@ -1104,10 +1236,10 @@ class VoronaAgentCore:
         else:
             llm_date = self._ensure_future_year(parsed_data.get("date"), combined_input, now)
 
-        dt_date_combined, _, _, _ = RussianDateTimeExtractor.extract_date_and_time_full(combined_input, now)
+        dt_date_combined, dt_time_combined, _, _ = RussianDateTimeExtractor.extract_date_and_time_full(combined_input, now)
         has_any_date_word = bool(
             dt_date_combined
-            or any(w in combined_input.lower() for w in ("сегодня", "завтра", "послезавтра", "недел", "числ", "месяц"))
+            or any(w in combined_input.lower() for w in ("сегодня", "завтра", "послезавтра", "недел", "числ", "месяц", "через"))
         )
         if not has_any_date_word and not (prev_staged and prev_staged.get("parsed_date")):
             llm_date = None
@@ -1115,11 +1247,17 @@ class VoronaAgentCore:
         if prev_staged:
             validated_date = None if invalid_date_new else (dt_date_new or llm_date or prev_staged.get("parsed_date"))
             validated_time = dt_time_new or llm_time or prev_staged.get("parsed_time")
-            action = prev_staged.get("action") or action_from_new or llm_action
+            action = prev_staged.get("action") or llm_action or action_from_new
         else:
-            validated_date = None if invalid_date_new else (dt_date_new or llm_date)
-            validated_time = dt_time_new or llm_time
-            action = action_from_new or llm_action
+            validated_date = None if invalid_date_new else (dt_date_new or llm_date or dt_date_combined)
+            validated_time = dt_time_new or llm_time or dt_time_combined
+            action = llm_action or action_from_new
+
+        if validated_time and not validated_date and not invalid_date_new:
+            if validated_time > now.strftime("%H:%M"):
+                validated_date = today_str
+            else:
+                validated_date = (now + timedelta(days=1)).strftime("%Y-%m-%d")
 
         prev_intent = prev_staged.get("intent") if prev_staged else None
         intent = RegexFallbackParser.detect_intent(
@@ -1179,11 +1317,18 @@ class VoronaAgentCore:
                 }
             }
 
-        conflicts = (
-            self.db.check_meeting_conflict(validated_date, validated_time, user_id=user_id)
-            if (intent == "Meeting" and validated_date and validated_time)
-            else []
-        )
+        try:
+            conflicts = (
+                self.db.check_meeting_conflict(validated_date, validated_time, user_id=user_id)
+                if (intent == "Meeting" and validated_date and validated_time)
+                else []
+            )
+        except TypeError:
+            conflicts = (
+                self.db.check_meeting_conflict(validated_date, validated_time)
+                if (intent == "Meeting" and validated_date and validated_time)
+                else []
+            )
 
         if auto_confirm:
             return self.confirm_pending(session_id=session_id, user_id=user_id)
@@ -1219,17 +1364,29 @@ class VoronaAgentCore:
         final_intent = staged.get("intent") if staged.get("intent") in VALID_INTENTS else "Task"
 
         try:
-            saved_item = self.db.save_confirmed_item(
-                intent=final_intent,
-                raw_text=staged.get("raw_text") or final_action,
-                action=final_action,
-                parsed_date=final_date,
-                parsed_time=final_time,
-                date_in_past=1 if final_date < today_str else 0,
-                parse_method=staged.get("parse_method", "llm"),
-                now_override=now,
-                user_id=user_id
-            )
+            try:
+                saved_item = self.db.save_confirmed_item(
+                    intent=final_intent,
+                    raw_text=staged.get("raw_text") or final_action,
+                    action=final_action,
+                    parsed_date=final_date,
+                    parsed_time=final_time,
+                    date_in_past=1 if final_date < today_str else 0,
+                    parse_method=staged.get("parse_method", "llm"),
+                    now_override=now,
+                    user_id=user_id
+                )
+            except TypeError:
+                saved_item = self.db.save_confirmed_item(
+                    intent=final_intent,
+                    raw_text=staged.get("raw_text") or final_action,
+                    action=final_action,
+                    parsed_date=final_date,
+                    parsed_time=final_time,
+                    date_in_past=1 if final_date < today_str else 0,
+                    parse_method=staged.get("parse_method", "llm"),
+                    now_override=now
+                )
             self.pending_buffer.pop(session_key, None)
             return {
                 "ui_status": "Зафиксировано",
@@ -1251,15 +1408,25 @@ class VoronaAgentCore:
 
         prev_state = self.rollback_buffer.pop(session_key, None)
         if prev_state:
-            self.db.update_item(
-                task_id=prev_state["id"],
-                action=prev_state["action"],
-                parsed_date=prev_state["parsed_date"],
-                parsed_time=prev_state["parsed_time"],
-                intent=prev_state["intent"],
-                status=prev_state["status"],
-                user_id=user_id
-            )
+            try:
+                self.db.update_item(
+                    task_id=prev_state["id"],
+                    action=prev_state["action"],
+                    parsed_date=prev_state["parsed_date"],
+                    parsed_time=prev_state["parsed_time"],
+                    intent=prev_state["intent"],
+                    status=prev_state["status"],
+                    user_id=user_id
+                )
+            except TypeError:
+                self.db.update_item(
+                    task_id=prev_state["id"],
+                    action=prev_state["action"],
+                    parsed_date=prev_state["parsed_date"],
+                    parsed_time=prev_state["parsed_time"],
+                    intent=prev_state["intent"],
+                    status=prev_state["status"]
+                )
 
         return {
             "ui_status": "Готова",
@@ -1278,7 +1445,7 @@ CANCEL_WORDS = {"нет", "неверно", "отмена", "отменить", 
 def get_shared_agent() -> VoronaAgentCore:
     global _default_db, _default_agent
     if _default_agent is None:
-        _default_db = DatabaseManager(db_path=":memory:")
+        _default_db = DatabaseManager(db_path="events.db")
         _default_agent = VoronaAgentCore(db=_default_db)
     return _default_agent
 
@@ -1412,3 +1579,8 @@ def run_agent_turn(
     )
     res["spoken_response"] = format_spoken_response(res)
     return res
+
+
+def run_agent_loop(user_query: str, history: Optional[List[Dict[str, str]]] = None) -> str:
+    turn_result = run_agent_turn(user_query=user_query, history=history)
+    return turn_result["spoken_response"]
