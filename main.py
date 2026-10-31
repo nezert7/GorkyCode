@@ -45,7 +45,7 @@ def get_user_memory(user_id: int) -> MemoryManager:
 
 
 def _background_notification_worker():
-    """каждые 30 сек проверяет задачи за 1 час до начала"""
+    """каждые 30 сек проверяет задачи за 1 час и за 1 минуту до начала"""
     while True:
         try:
             agent = get_shared_agent()
@@ -53,10 +53,14 @@ def _background_notification_worker():
             for item in due_items:
                 uid = int(item.get("user_id") or 1)
                 kind = get_intent_label_ru(item.get("intent"))
-                msg = f"Напоминание за час! {kind}: «{item.get('action')}» в {item.get('parsed_time')}."
+                if item.get("notify_kind") == "minute":
+                    msg = f"Через минуту! {kind}: «{item.get('action')}» в {item.get('parsed_time')}."
+                else:
+                    msg = f"Напоминание за час! {kind}: «{item.get('action')}» в {item.get('parsed_time')}."
                 _pending_ui_notifications.setdefault(uid, []).append({
                     "id": item.get("id"),
                     "message": msg,
+                    "type": item.get("notify_kind"),
                     "item": item
                 })
         except Exception:

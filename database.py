@@ -278,7 +278,8 @@ class CalendarIntegration:
         kind = get_intent_label_ru(item.get("intent"))
         raw_action = item.get("action") or "Событие"
         time_str = item.get("parsed_time") or ""
-        title = f"Ворона — {kind} через час"
+        when = "через минуту" if item.get("notify_kind") == "minute" else "через час"
+        title = f"Ворона — {kind} {when}"
         msg = f"{raw_action} (в {time_str})" if time_str else raw_action
 
         if sys.platform == "darwin":
@@ -1006,12 +1007,13 @@ class DatabaseManager:
         today_str = now_dt.strftime("%Y-%m-%d")
         tomorrow_str = (now_dt + timedelta(days=1)).strftime("%Y-%m-%d")
 
+        # notified — битовая маска: 1 = уведомили за час, 2 = уведомили за минуту (3 = оба, 0 = ничего)
         with self._get_conn() as conn:
             rows = conn.execute("""
-                SELECT id, user_id, intent, raw_text, action, parsed_date, parsed_time, status
+                SELECT id, user_id, intent, raw_text, action, parsed_date, parsed_time, status, notified
                 FROM tasks
                 WHERE status = 'Active'
-                  AND COALESCE(notified, 0) = 0
+                  AND COALESCE(notified, 0) < 3
                   AND parsed_date IN (?, ?)
                   AND parsed_time IS NOT NULL
             """, (today_str, tomorrow_str)).fetchall()
@@ -1027,12 +1029,20 @@ class DatabaseManager:
                 continue
 
             diff_seconds = (event_dt - now_dt).total_seconds()
-            if 0 <= diff_seconds <= 3600:
-                with self._get_conn() as conn:
-                    conn.execute("UPDATE tasks SET notified = 1 WHERE id = ?", (item["id"],))
-                    conn.commit()
-                if self._should_sync_os_calendar():
-                    CalendarIntegration.send_os_notification(item)
-                triggered.append(item)
+            flags = int(item.get("notified") or 0)
+
+            if -30 <= diff_seconds <= 60 and not (flags & 2):
+                item["notify_kind"], new_flags = "minute", 3  # за минуту; «за час» после него уже не нужно
+            elif 60 < diff_seconds <= 3600 and not (flags & 1):
+                item["notify_kind"], new_flags = "hour", flags | 1
+            else:
+                continue
+
+            with self._get_conn() as conn:
+                conn.execute("UPDATE tasks SET notified = ? WHERE id = ?", (new_flags, item["id"]))
+                conn.commit()
+            if self._should_sync_os_calendar():
+                CalendarIntegration.send_os_notification(item)
+            triggered.append(item)
 
         return triggered
