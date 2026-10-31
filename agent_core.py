@@ -3,6 +3,7 @@ import re
 import json
 import time
 import uuid
+import calendar
 import urllib3
 import httpx
 from datetime import datetime, timedelta
@@ -28,30 +29,64 @@ def format_date_ru(date_str: Optional[str]) -> str:
 
 class RussianDateTimeExtractor:
     """
-    Точное извлечение дат, времени и относительных интервалов из русской речи:
-    - «через 2 часа», «через 5 часов», «через полчаса», «через 45 минут», «через 3 дня» -> точная дата + время.
-    - «12 часов ночи» -> 00:00, «12 часов дня» -> 12:00.
-    - Реальные прошедшие даты текущего года (например, 15 февраля) переносятся на следующий год.
-    - Любые несуществующие даты (31 февраля, 31 ноября, 31 апреля, 29 февраля) строго блокируются и требуют уточнения.
+    Точное извлечение дат, времени и разговорных конструкций из русской речи:
+    - «на половину девятого вечера», «в полдевятого», «пол 9 вечера» -> 20:30.
+    - «без пятнадцати девять вечера», «без четверти семь», «без 10 час дня» -> 20:45, 18:45, 12:50.
+    - «пятнадцать минут десятого вечера», «четверть шестого» -> 21:15, 17:15.
+    - «в 8 часов 20 минут утра», «в три тридцать дня» -> 08:20, 15:30.
+    - «через 2 часа», «через полтора часа», «через 45 минут», «через 3 дня» -> точная дата + время.
+    - Самоисправления: «в три, нет, в четыре дня», «завтра, ой нет, послезавтра».
+    - Любые несуществующие даты (31 февраля, 31 ноября, 31 апреля, 29 февраля в невисокосный год) блокируются.
     """
 
+    # Именительный/винительный падеж часов для конструкций «в три часа», «в девять вечера»
+    # (Родительный падеж 'девятого' вынесен отдельно в GENITIVE_HOURS, чтобы не ломать 'половину девятого' и 'девятого числа')
     WORD_HOURS = {
         "двадцать четыре": 0, "двадцать три": 23, "двадцать два": 22, "двадцать один": 21,
         "двадцать": 20, "девятнадцать": 19, "восемнадцать": 18, "семнадцать": 17,
         "шестнадцать": 16, "пятнадцать": 15, "четырнадцать": 14, "тринадцать": 13,
-        "двенадцать": 12, "двенадцати": 12, "двенадцатого": 12,
-        "одиннадцать": 11, "одиннадцати": 11, "одиннадцатого": 11,
-        "десять": 10, "десяти": 10, "десятого": 10,
-        "девять": 9, "девяти": 9, "девятого": 9,
-        "восемь": 8, "восьми": 8, "восьмого": 8,
-        "семь": 7, "семи": 7, "седьмого": 7,
-        "шесть": 6, "шести": 6, "шестого": 6,
-        "пять": 5, "пяти": 5, "пятого": 5,
-        "четыре": 4, "четырех": 4, "четырёх": 4, "четвертого": 4, "четвёртого": 4,
-        "три": 3, "трех": 3, "трёх": 3, "третьего": 3,
-        "два": 2, "двух": 2, "второго": 2,
-        "час": 1, "один": 1, "одного": 1, "первого": 1,
-        "ноль": 0
+        "двенадцать": 12, "одиннадцать": 11, "десять": 10, "девять": 9,
+        "восемь": 8, "семь": 7, "шесть": 6, "пять": 5,
+        "четыре": 4, "три": 3, "два": 2, "час": 1, "один": 1, "ноль": 0
+    }
+
+    # Родительный падеж («первого», «второго», ..., «двенадцатого») для:
+    # «половина девятого», «полдевятого», «четверть десятого», «двадцать минут шестого»
+    GENITIVE_HOURS = {
+        "первого": 1, "второго": 2, "третьего": 3,
+        "четвертого": 4, "четвёртого": 4, "пятого": 5,
+        "шестого": 6, "седьмого": 7, "восьмого": 8,
+        "девятого": 9, "десятого": 10, "одиннадцатого": 11,
+        "двенадцатого": 12
+    }
+
+    # Слитные разговорные формы «полпервого» .. «полдвенадцатого»
+    MERGED_HALF_HOURS = {
+        "полпервого": 1, "полвторого": 2, "полтретьего": 3,
+        "полчетвертого": 4, "полчетвёртого": 4, "полпятого": 5,
+        "полшестого": 6, "полседьмого": 7, "полвосьмого": 8,
+        "полдевятого": 9, "полдесятого": 10, "полодиннадцатого": 11,
+        "полдвенадцатого": 12
+    }
+
+    # Минуты в родительном падеже для «без <N> минут <час>»
+    WITHOUT_MINUTES_MAP = {
+        "пяти": 5, "пять": 5,
+        "десяти": 10, "десять": 10,
+        "пятнадцати": 15, "пятнадцать": 15, "четверти": 15, "четверть": 15,
+        "двадцати пяти": 25, "двадцать пять": 25,
+        "двадцати": 20, "двадцать": 20,
+        "тридцати": 30
+    }
+
+    # Минуты в именительном/винительном падеже («пятнадцать минут десятого», «в восемь тридцать»)
+    SPOKEN_MINUTES_MAP = {
+        "пятьдесят пять": 55, "пятьдесят": 50,
+        "сорок пять": 45, "сорок": 40,
+        "тридцать пять": 35, "тридцать": 30,
+        "двадцать пять": 25, "двадцать": 20,
+        "пятнадцать": 15, "четверть": 15,
+        "десять": 10, "пять": 5
     }
 
     RELATIVE_NUMBERS = {
@@ -66,8 +101,8 @@ class RussianDateTimeExtractor:
         "девять": 9, "девяти": 9,
         "десять": 10, "десяти": 10,
         "одиннадцать": 11, "двенадцать": 12,
-        "пятнадцать": 15, "двадцать": 20, "тридцать": 30,
-        "сорок": 40, "сорок пять": 45, "пятьдесят": 50
+        "пятнадцать": 15, "двадцать": 20, "двадцать пять": 25,
+        "тридцать": 30, "сорок": 40, "сорок пять": 45, "пятьдесят": 50
     }
 
     WORD_DAYS = [
@@ -122,6 +157,40 @@ class RussianDateTimeExtractor:
     )
 
     @classmethod
+    def _apply_self_corrections(cls, text: str) -> str:
+        """
+        Убирает оговорки и самоисправления пользователя:
+        - «завтра, нет, послезавтра» -> «послезавтра»
+        - «в пятницу а нет в субботу» -> «в субботу»
+        - «в три, нет, в четыре часа дня» -> «в четыре часа дня»
+        - «в 18:00 ой нет в 19:30» -> «в 19:30»
+        """
+        res = text
+        # 1. Самоисправление относительных дней
+        res = re.sub(
+            r"\b(?:на\s+)?(?:сегодня|завтра|послезавтра|вчера)[\s,]*(?:ой|а|или)?[\s,]*нет[\s,]+((?:на\s+)?(?:сегодня|завтра|послезавтра))\b",
+            r"\1",
+            res,
+            flags=re.IGNORECASE
+        )
+        # 2. Самоисправление дней недели
+        wd_pat = "|".join(cls.WEEKDAYS_MAP.keys())
+        res = re.sub(
+            rf"\b(?:в|во|на)\s+(?:{wd_pat})[\s,]*(?:ой|а|или)?[\s,]*нет[\s,]+((?:в|во|на)\s+(?:{wd_pat}))\b",
+            r"\1",
+            res,
+            flags=re.IGNORECASE
+        )
+        # 3. Самоисправление времени с предлогом «в/на/к» («в три, нет, в четыре часа дня», «в 15:00 нет в 16:30»)
+        res = re.sub(
+            r"\b(?:в|на|к)\s+(?:\d{1,2}(?:[:.]\d{2})?|[а-яё]+)(?:\s+час(?:а|ов)?)?(?:\s+(?:утра|дня|вечера|ночи))?[\s,]*(?:ой|а|или|точнее)?[\s,]*нет[\s,]+((?:в|на|к)\s+)",
+            r"\1",
+            res,
+            flags=re.IGNORECASE
+        )
+        return res
+
+    @classmethod
     def _match_month_number(cls, month_word: str) -> Optional[int]:
         w = month_word.strip().lower()
         for prefix, num in cls.MONTHS_LIST:
@@ -137,21 +206,52 @@ class RussianDateTimeExtractor:
             res = re.sub(pat_before, rf"{day_num} \1", res, flags=re.IGNORECASE)
             pat_after = rf"\b(?:в|на)\s+{cls.MONTH_REGEX_PART}\s+(?:{word_pat})(?:\s+числ[аоуе]?)?\b"
             res = re.sub(pat_after, rf"{day_num} \1", res, flags=re.IGNORECASE)
+            # «двадцать пятого числа» (без месяца) -> «25 числа»
+            pat_day_only = rf"\b(?:{word_pat})\s+числ[аоуе]\b"
+            res = re.sub(pat_day_only, f"{day_num} числа", res, flags=re.IGNORECASE)
         return res
 
     @staticmethod
     def _adjust_hour_by_period(h: int, period_context: str) -> int:
         p = period_context.lower()
         if "ноч" in p:
-            return 0 if h == 12 else h
-        if "вечер" in p or "дня" in p or "день" in p:
+            if h == 12:
+                return 0
+            if 1 <= h <= 5:
+                return h
+            if 9 <= h <= 11:
+                return h + 12
+            return h
+        if "вечер" in p or "дня" in p or "день" in p or "после обеда" in p:
             if 1 <= h <= 11:
                 return h + 12
             if h == 12:
                 return 12
-        if "утр" in p and h == 12:
-            return 0
+        if "утр" in p:
+            if h == 12:
+                return 0
+            return h
         return h
+
+    @classmethod
+    def _resolve_russian_next_hour_base(cls, next_hour_num: int, period_context: str) -> int:
+        """
+        Переводит русский «следующий час» («половина девятого», «четверть десятого», «20 минут первого»)
+        в 24-часовой базовый час (для «девятого» база = 8 или 20).
+        """
+        base_h = (next_hour_num - 1) % 12  # 1 ('первого') -> 0, 9 ('девятого') -> 8, 12 ('двенадцатого') -> 11
+        p = period_context.lower()
+        if "вечер" in p or "дня" in p or "после обеда" in p:
+            if base_h < 12:
+                base_h += 12
+        elif "ноч" in p:
+            if base_h in (10, 11):  # «половина двенадцатого ночи» -> 23:30
+                base_h += 12
+        elif "утр" not in p:
+            # Если время суток не уточнено: для «полпервого..полшестого» обычно день (12:30..17:30)
+            if 0 <= base_h <= 5:
+                base_h += 12
+        return base_h % 24
 
     @staticmethod
     def _resolve_year_for_month_day(month: int, day: int, explicit_year: Optional[int], now: datetime) -> datetime:
@@ -167,38 +267,47 @@ class RussianDateTimeExtractor:
     def _extract_relative_offset(cls, clean: str, now: datetime) -> Tuple[Optional[str], Optional[str], str]:
         """
         Распознаёт и вырезает из текста относительные конструкции:
-        - «через полчаса», «через полтора часа»
-        - «через 2 часа», «через пять часов», «через час»
-        - «через 30 минут», «через минуту»
+        - «через полчаса», «через полтора часа», «через четверть часа»
+        - «через 2 часа», «через пять часов», «через час», «через пару часов»
+        - «через 30 минут», «через минуту», «через пару минут»
         - «через 2 часа 30 минут»
         - «через 3 дня», «через две недели», «через месяц»
         """
         lower = clean.lower()
 
-        m_half = re.search(r"\bчерез\s+пол\s*часа\b", lower)
+        m_quarter = re.search(r"\bчерез\s+четверть\s+часа\b", lower)
+        if m_quarter:
+            target = now + timedelta(minutes=15)
+            new_clean = clean[:m_quarter.start()] + " " + clean[m_quarter.end():]
+            return target.strftime("%Y-%m-%d"), target.strftime("%H:%M"), new_clean
+
+        m_half = re.search(r"\bчерез\s+(?:пол\s*часа|полчасика)\b", lower)
         if m_half:
             target = now + timedelta(minutes=30)
             new_clean = clean[:m_half.start()] + " " + clean[m_half.end():]
             return target.strftime("%Y-%m-%d"), target.strftime("%H:%M"), new_clean
 
-        m_15h = re.search(r"\bчерез\s+полтора\s+часа\b", lower)
+        m_15h = re.search(r"\bчерез\s+(?:полтора\s+часа|1[.,]5\s*часа)\b", lower)
         if m_15h:
             target = now + timedelta(minutes=90)
             new_clean = clean[:m_15h.start()] + " " + clean[m_15h.end():]
             return target.strftime("%Y-%m-%d"), target.strftime("%H:%M"), new_clean
 
+        num_words_pat = "|".join(sorted(cls.RELATIVE_NUMBERS.keys(), key=len, reverse=True))
+
+        # Комбинированное: «через X часов [и] Y минут» (цифрами или словами)
         m_combo = re.search(
-            r"\bчерез\s+(\d+)\s*час(?:а|ов)?\s*(?:и\s*)?(\d+)\s*минут[ыу]?\b",
+            rf"\bчерез\s+(\d+|{num_words_pat})\s*час(?:а|ов)?\s*(?:и\s*)?(\d+|{num_words_pat})\s*минут[ыу]?\b",
             lower
         )
         if m_combo:
-            h_delta = int(m_combo.group(1))
-            m_delta = int(m_combo.group(2))
+            raw_h, raw_m = m_combo.group(1).strip(), m_combo.group(2).strip()
+            h_delta = int(raw_h) if raw_h.isdigit() else cls.RELATIVE_NUMBERS.get(raw_h, 1)
+            m_delta = int(raw_m) if raw_m.isdigit() else cls.RELATIVE_NUMBERS.get(raw_m, 1)
             target = now + timedelta(hours=h_delta, minutes=m_delta)
             new_clean = clean[:m_combo.start()] + " " + clean[m_combo.end():]
             return target.strftime("%Y-%m-%d"), target.strftime("%H:%M"), new_clean
 
-        num_words_pat = "|".join(sorted(cls.RELATIVE_NUMBERS.keys(), key=len, reverse=True))
         m_hours = re.search(
             rf"\bчерез\s+(?:(\d+|{num_words_pat})\s+)?час(?:а|ов|ик|ика)?\b",
             lower
@@ -211,7 +320,7 @@ class RussianDateTimeExtractor:
             return target.strftime("%Y-%m-%d"), target.strftime("%H:%M"), new_clean
 
         m_mins = re.search(
-            rf"\bчерез\s+(?:(\d+|{num_words_pat})\s+)?минут[уы]?\b",
+            rf"\bчерез\s+(?:(\d+|{num_words_pat})\s+)?минут[уык]?(?:у|и)?\b",
             lower
         )
         if m_mins:
@@ -252,25 +361,131 @@ class RussianDateTimeExtractor:
         return None, None, clean
 
     @classmethod
+    def _extract_conversational_russian_time(cls, clean: str) -> Tuple[Optional[str], str]:
+        """
+        Обрабатывает разговорные русские конструкции времени:
+        1) «в/на половину девятого вечера», «в половине девятого», «полдевятого вечера», «пол-девятого», «пол 9 вечера»
+        2) «без пятнадцати девять вечера», «без четверти семь», «без 10 час дня», «без 15 9 вечера»
+        3) «пятнадцать минут десятого вечера», «четверть десятого утра», «20 минут шестого»
+        """
+        lower = clean.lower()
+
+        # А. Слитные формы «полпервого» .. «полдвенадцатого»
+        merged_pat = "|".join(sorted(cls.MERGED_HALF_HOURS.keys(), key=len, reverse=True))
+        m_merged = re.search(
+            rf"\b(?:(?:в|на|к)\s+)?({merged_pat})(?:\s+(утра|дня|вечера|ночи))?\b",
+            lower
+        )
+        if m_merged:
+            next_h = cls.MERGED_HALF_HOURS[m_merged.group(1)]
+            period_ctx = m_merged.group(2) or lower
+            base_h = cls._resolve_russian_next_hour_base(next_h, period_ctx)
+            new_clean = clean[:m_merged.start()] + " " + clean[m_merged.end():]
+            return f"{base_h:02d}:30", new_clean
+
+        # Б. Раздельные формы половины: «в/на половине/половину/пол девятого/9 [вечера]»
+        gen_pat = "|".join(sorted(cls.GENITIVE_HOURS.keys(), key=len, reverse=True))
+        nom_pat = "|".join(sorted(cls.WORD_HOURS.keys(), key=len, reverse=True))
+        m_half = re.search(
+            rf"\b(?:(?:в|на|к)\s+)?(?:половин[еуыа]\s+|пол[-\s]+)({gen_pat}|\d{{1,2}}|{nom_pat})(?:\s*час(?:а|ов)?)?(?:\s+(утра|дня|вечера|ночи))?\b",
+            lower
+        )
+        if m_half:
+            h_token = m_half.group(1).strip()
+            period_ctx = m_half.group(2) or lower
+            next_h: Optional[int] = None
+            if h_token in cls.GENITIVE_HOURS:
+                next_h = cls.GENITIVE_HOURS[h_token]
+            elif h_token.isdigit() and 1 <= int(h_token) <= 12:
+                next_h = int(h_token)
+            elif h_token in cls.WORD_HOURS and 1 <= cls.WORD_HOURS[h_token] <= 12:
+                next_h = cls.WORD_HOURS[h_token]
+
+            if next_h is not None:
+                base_h = cls._resolve_russian_next_hour_base(next_h, period_ctx)
+                new_clean = clean[:m_half.start()] + " " + clean[m_half.end():]
+                return f"{base_h:02d}:30", new_clean
+
+        # В. «без пятнадцати девять вечера», «без четверти семь», «без 10 9 вечера», «без десяти час дня»
+        without_mins_pat = "|".join(sorted(cls.WITHOUT_MINUTES_MAP.keys(), key=len, reverse=True))
+        m_without = re.search(
+            rf"\b(?:(?:в|на|к)\s+)?без\s+({without_mins_pat}|\d{{1,2}})(?:\s+минут)?\s+({nom_pat}|{gen_pat}|\d{{1,2}})(?:\s*час(?:а|ов)?)?(?:\s+(утра|дня|вечера|ночи))?\b",
+            lower
+        )
+        if m_without:
+            min_tok = m_without.group(1).strip()
+            hour_tok = m_without.group(2).strip()
+            period_ctx = m_without.group(3) or lower
+
+            minus_m = int(min_tok) if min_tok.isdigit() else cls.WITHOUT_MINUTES_MAP.get(min_tok, 0)
+            target_h: Optional[int] = None
+            if hour_tok in cls.WORD_HOURS:
+                target_h = cls.WORD_HOURS[hour_tok]
+            elif hour_tok in cls.GENITIVE_HOURS:
+                target_h = cls.GENITIVE_HOURS[hour_tok]
+            elif hour_tok.isdigit() and 0 <= int(hour_tok) <= 24:
+                target_h = int(hour_tok) % 24
+
+            if target_h is not None and 1 <= minus_m <= 59:
+                if period_ctx:
+                    target_h = cls._adjust_hour_by_period(target_h, period_ctx)
+                elif 1 <= target_h <= 6:
+                    target_h += 12
+                final_h = (target_h - 1) % 24
+                final_m = 60 - minus_m
+                new_clean = clean[:m_without.start()] + " " + clean[m_without.end():]
+                return f"{final_h:02d}:{final_m:02d}", new_clean
+
+        # Г. «четверть десятого вечера», «пятнадцать минут десятого», «20 минут первого дня»
+        spoken_mins_pat = "|".join(sorted(cls.SPOKEN_MINUTES_MAP.keys(), key=len, reverse=True))
+        m_past = re.search(
+            rf"\b(?:(?:в|на|к)\s+)?(?:(четверть)|({spoken_mins_pat}|\d{{1,2}})\s+минут)\s+({gen_pat})(?:\s+(утра|дня|вечера|ночи))?\b",
+            lower
+        )
+        if m_past:
+            if m_past.group(1):
+                mins_val = 15
+            else:
+                m_tok = m_past.group(2).strip()
+                mins_val = int(m_tok) if m_tok.isdigit() else cls.SPOKEN_MINUTES_MAP.get(m_tok, 0)
+            next_h = cls.GENITIVE_HOURS[m_past.group(3)]
+            period_ctx = m_past.group(4) or lower
+            if 1 <= mins_val <= 59:
+                base_h = cls._resolve_russian_next_hour_base(next_h, period_ctx)
+                new_clean = clean[:m_past.start()] + " " + clean[m_past.end():]
+                return f"{base_h:02d}:{mins_val:02d}", new_clean
+
+        return None, clean
+
+    @classmethod
     def extract_date_and_time_full(
         cls, text: str, now: datetime
     ) -> Tuple[Optional[str], Optional[str], str, Optional[str]]:
         """
         Возвращает: (parsed_date, parsed_time, clean_text_without_datetime, invalid_date_error).
         """
-        clean = cls._normalize_word_days_before_months(text)
+        clean = cls._apply_self_corrections(text)
+        clean = cls._normalize_word_days_before_months(clean)
         parsed_date: Optional[str] = None
         parsed_time: Optional[str] = None
         invalid_date_str: Optional[str] = None
 
+        # 1. Относительные смещения («через 2 часа», «через полчаса», «через 3 дня»)
         rel_date, rel_time, clean = cls._extract_relative_offset(clean, now)
         if rel_date:
             parsed_date = rel_date
         if rel_time:
             parsed_time = rel_time
 
+        # 2. Разговорные конструкции времени («на половину девятого вечера», «полдевятого», «без пятнадцати девять», «четверть десятого»)
+        if not parsed_time:
+            conv_time, clean = cls._extract_conversational_russian_time(clean)
+            if conv_time:
+                parsed_time = conv_time
+
         lower = clean.lower()
 
+        # 3. Явный перехват «12 часов ночи» / «полночь» -> 00:00 и «12 часов дня» / «полдень» -> 12:00
         if not parsed_time:
             midnight_m = re.search(
                 r"\b(?:в|на|к)?\s*(?:12|двенадцат[ьи])\s*(?:час(?:а|ов|у)?\s*)?ночи\b|\b(?:в|на)?\s*полночь\b",
@@ -289,6 +504,7 @@ class RussianDateTimeExtractor:
                 clean = clean[:noon_m.start()] + " " + clean[noon_m.end():]
                 lower = clean.lower()
 
+        # 4. Время в формате HH:MM или HH.MM
         if not parsed_time:
             tm = re.search(
                 r"(?:(?:\bв|\bна|\bк)\s+)?\b([0-2]?\d)[:.]([0-5]\d)(?!\.\d{2,4})\b(?:\s*(утра|вечера|дня|ночи))?",
@@ -304,24 +520,7 @@ class RussianDateTimeExtractor:
                         clean = clean[:tm.start()] + " " + clean[tm.end():]
                         lower = clean.lower()
 
-        if not parsed_time:
-            half_m = re.search(r"\b(?:в\s+)?половине\s+([а-яё]+)(?:\s+(утра|дня|вечера|ночи))?", lower)
-            if half_m and half_m.group(1) in cls.WORD_HOURS:
-                target_h = cls.WORD_HOURS[half_m.group(1)] - 1
-                period_ctx = half_m.group(2) or lower
-                if target_h == 11 and "ноч" in period_ctx:
-                    target_h = 23
-                elif (
-                    ("вечер" in period_ctx or "дня" in period_ctx or 1 <= target_h <= 6)
-                    and target_h < 12
-                    and "утр" not in period_ctx
-                    and "ноч" not in period_ctx
-                ):
-                    target_h += 12
-                parsed_time = f"{target_h % 24:02d}:30"
-                clean = clean[:half_m.start()] + " " + clean[half_m.end():]
-                lower = clean.lower()
-
+        # 5. Даты с названием месяца («31 февраля», «31 ноября», «15 февраля»)
         if not parsed_date:
             month_m = re.search(
                 rf"(?:\b(?:на|в)\s+)?\b(\d{{1,2}})\s+(?:числ[аоуе]?\s+)?{cls.MONTH_REGEX_PART}(?:\s+(\d{{4}})\s*(?:год[ау]?|г\.?)?)?\b",
@@ -360,6 +559,28 @@ class RussianDateTimeExtractor:
                     except ValueError:
                         invalid_date_str = raw_matched_date
 
+        # 6. Даты без месяца со словом «числа» («25 числа», «пятого числа»)
+        if not parsed_date and not invalid_date_str:
+            day_only_m = re.search(r"(?:\b(?:на|в)\s+)?\b(\d{1,2})\s+числ[аоуе]\b", lower)
+            if day_only_m:
+                d = int(day_only_m.group(1))
+                raw_matched_date = f"{d} числа"
+                clean = clean[:day_only_m.start()] + " " + clean[day_only_m.end():]
+                lower = clean.lower()
+                max_day_cur = calendar.monthrange(now.year, now.month)[1]
+                if 1 <= d <= max_day_cur and d >= now.day:
+                    parsed_date = datetime(now.year, now.month, d).strftime("%Y-%m-%d")
+                elif 1 <= d <= 31:
+                    next_m = 1 if now.month == 12 else now.month + 1
+                    next_y = now.year + 1 if now.month == 12 else now.year
+                    try:
+                        parsed_date = datetime(next_y, next_m, d).strftime("%Y-%m-%d")
+                    except ValueError:
+                        invalid_date_str = raw_matched_date
+                else:
+                    invalid_date_str = raw_matched_date
+
+        # 7. Даты формата DD.MM(.YYYY)
         if not parsed_date and not invalid_date_str:
             dm_match = re.search(r"(?:\bна\s+)?\b(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?\b", lower)
             if dm_match:
@@ -374,6 +595,27 @@ class RussianDateTimeExtractor:
                 except ValueError:
                     invalid_date_str = raw_matched_date
 
+        # 8. Часы с минутами словами или цифрами («в 9 часов 15 минут вечера», «в восемь тридцать утра»)
+        if not parsed_time:
+            nom_pat = "|".join(sorted(cls.WORD_HOURS.keys(), key=len, reverse=True))
+            sp_min_pat = "|".join(sorted(cls.SPOKEN_MINUTES_MAP.keys(), key=len, reverse=True))
+            hm_combo = re.search(
+                rf"\b(?:в|на|к)\s+(\d{{1,2}}|{nom_pat})(?:\s+час(?:а|ов)?)?\s+(\d{{1,2}}|{sp_min_pat})(?:\s+минут[ыу]?)?(?:\s+(утра|дня|вечера|ночи))?\b",
+                lower
+            )
+            if hm_combo:
+                h_tok = hm_combo.group(1).strip()
+                m_tok = hm_combo.group(2).strip()
+                period_word = hm_combo.group(3) or ""
+                h_val = int(h_tok) if h_tok.isdigit() else cls.WORD_HOURS.get(h_tok, -1)
+                m_val = int(m_tok) if m_tok.isdigit() else cls.SPOKEN_MINUTES_MAP.get(m_tok, -1)
+                if 0 <= h_val <= 23 and 0 <= m_val <= 59:
+                    h_val = cls._adjust_hour_by_period(h_val, period_word or lower)
+                    parsed_time = f"{h_val:02d}:{m_val:02d}"
+                    clean = clean[:hm_combo.start()] + " " + clean[hm_combo.end():]
+                    lower = clean.lower()
+
+        # 9. Время цифрами: «в 15 часов», «в 3 часа дня», «в 7 вечера»
         if not parsed_time:
             hm = re.search(
                 r"\b(?:(?:в|на|к)\s+([0-2]?\d)\s*(?:час(?:а|ов|у)?)?(?:\s*(утра|вечера|дня|ночи))?|"
@@ -390,6 +632,7 @@ class RussianDateTimeExtractor:
                     clean = clean[:hm.start()] + " " + clean[hm.end():]
                     lower = clean.lower()
 
+        # 10. Время словами: «в три часа дня», «в час ночи», «в девять вечера»
         if not parsed_time:
             for word, h_val in sorted(cls.WORD_HOURS.items(), key=lambda x: -len(x[0])):
                 pat = (
@@ -406,6 +649,7 @@ class RussianDateTimeExtractor:
                         lower = clean.lower()
                         break
 
+        # 11. Относительные слова: послезавтра, завтра, сегодня, вчера, на выходных
         if not parsed_date and not invalid_date_str:
             if re.search(r"\b(?:на\s+)?послезавтра\b", lower):
                 parsed_date = (now + timedelta(days=2)).strftime("%Y-%m-%d")
@@ -419,16 +663,25 @@ class RussianDateTimeExtractor:
             elif re.search(r"\b(?:на\s+)?вчера\b", lower):
                 parsed_date = (now - timedelta(days=1)).strftime("%Y-%m-%d")
                 clean = re.sub(r"\b(?:на\s+)?вчера\b", " ", clean, flags=re.IGNORECASE)
+            elif re.search(r"\b(?:на|в)\s+выходн(?:ые|ых)\b", lower):
+                days_to_sat = (5 - now.weekday()) % 7 or 7
+                parsed_date = (now + timedelta(days=days_to_sat)).strftime("%Y-%m-%d")
+                clean = re.sub(r"\b(?:на|в)\s+выходн(?:ые|ых)\b", " ", clean, flags=re.IGNORECASE)
 
+        # 12. Дни недели: «в пятницу», «на субботу», «в этот четверг»
         if not parsed_date and not invalid_date_str:
             for day_word, target_wd in cls.WEEKDAYS_MAP.items():
-                wd_m = re.search(rf"\b(?:в|во|на)\s+(?:следующ[уюийе]+\s+)?{day_word}\b", clean.lower())
+                wd_m = re.search(
+                    rf"\b(?:в|во|на)\s+(?:эт[уот]\s+|следующ[уюийе]+\s+|ближайш[уюийе]+\s+)?{day_word}\b",
+                    clean.lower()
+                )
                 if wd_m:
                     days_ahead = (target_wd - now.weekday()) % 7 or 7
                     parsed_date = (now + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
                     clean = clean[:wd_m.start()] + " " + clean[wd_m.end():]
                     break
 
+        # 13. Если время определено, а дата не названа — ставим сегодня (или завтра, если время уже прошло)
         if parsed_time and not parsed_date and not invalid_date_str:
             now_hm = now.strftime("%H:%M")
             if parsed_time > now_hm:
@@ -436,6 +689,7 @@ class RussianDateTimeExtractor:
             else:
                 parsed_date = (now + timedelta(days=1)).strftime("%Y-%m-%d")
 
+        clean = re.sub(r"\b(?:утра|вечера|дня|ночи)\b", " ", clean, flags=re.IGNORECASE)
         clean = re.sub(r"\b\d{4}\s*(?:год[ау]?|г\.?)\b", " ", clean, flags=re.IGNORECASE)
         clean = re.sub(r"\s+", " ", clean).strip(" ,.-?!")
         return parsed_date, parsed_time, clean, invalid_date_str
@@ -642,7 +896,7 @@ class RegexFallbackParser:
         for _ in range(3):
             clean = re.sub(cls.PARASITE_WORDS, " ", clean, flags=re.IGNORECASE)
         clean = re.sub(r"^(?:на|в|к|про|о|об|мне|что\s+надо|что\s+нужно|чтобы)\s+", "", clean.strip(), flags=re.IGNORECASE)
-        clean = re.sub(r"\b(?:на|в|к|через)\s*$", "", clean.strip(), flags=re.IGNORECASE)
+        clean = re.sub(r"\b(?:на|в|к|через|без|половину|половине|пол)\s*$", "", clean.strip(), flags=re.IGNORECASE)
         clean = re.sub(r"\s+", " ", clean).strip(" ,.-?!")
         if not clean:
             return None
@@ -829,10 +1083,11 @@ class GigaChatClient:
     def complete_json(self, system_prompt: str, user_text: str) -> Optional[Dict[str, Any]]:
         token = self._ensure_token()
         extra_instruction = (
-            "\nДОПОЛНИТЕЛЬНОЕ ПРАВИЛО ДЛЯ ОТНОСИТЕЛЬНОГО ВРЕМЕНИ: если пользователь говорит "
-            "«через N часов», «через N минут» или «через полчаса», прибавь этот интервал к текущему "
-            "времени из начала промпта, обязательно укажи вычисленные 'date' (YYYY-MM-DD) и 'time' (HH:MM), "
-            "поставь 'operation': 'create', а из поля 'action' полностью удали слова «через N часов/минут»!"
+            "\nДОПОЛНИТЕЛЬНЫЕ ПРАВИЛА ВРЕМЕНИ:\n"
+            "1) Если сказано «через N часов/минут/полчаса/полтора часа», прибавь интервал к текущему времени, "
+            "обязательно заполни 'date' и 'time', а слова времени удали из 'action'.\n"
+            "2) «в/на половину девятого вечера» / «полдевятого вечера» = 20:30 (НЕ 21:00!). "
+            "«без пятнадцати девять вечера» = 20:45. «четверть десятого вечера» = 21:15."
         )
         payload = {
             "model": self.model,
@@ -1239,7 +1494,7 @@ class VoronaAgentCore:
         dt_date_combined, dt_time_combined, _, _ = RussianDateTimeExtractor.extract_date_and_time_full(combined_input, now)
         has_any_date_word = bool(
             dt_date_combined
-            or any(w in combined_input.lower() for w in ("сегодня", "завтра", "послезавтра", "недел", "числ", "месяц", "через"))
+            or any(w in combined_input.lower() for w in ("сегодня", "завтра", "послезавтра", "недел", "числ", "месяц", "через", "выходн"))
         )
         if not has_any_date_word and not (prev_staged and prev_staged.get("parsed_date")):
             llm_date = None
