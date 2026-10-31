@@ -28,8 +28,6 @@ def get_intent_label_ru(intent: Optional[str]) -> str:
     return "Задача"
 
 
-# ДРАЙВЕР ОБЛАЧНОЙ БАЗЫ TURSO
-
 
 class TursoCursor:
     def __init__(self, conn: "TursoConnection"):
@@ -133,8 +131,6 @@ class TursoConnection:
         return first.get("response", {}).get("result", {})
 
 
-
-# ВЕКТОРИЗАЦИЯ И КАЛЕНДАРЬ
 
 
 class TextVectorizer:
@@ -364,7 +360,6 @@ class CalendarIntegration:
         return "\r\n".join(lines)
 
 
-# МЕНЕДЖЕР БАЗЫ ДАННЫХ (Turso Cloud ИЛИ Чистый In-Memory SQLite)
 
 
 class DatabaseManager:
@@ -389,7 +384,6 @@ class DatabaseManager:
             self._turso_http = httpx.Client(timeout=15.0)
             print(f"☁️ [ОБЛАЧНАЯ БД] Подключена база Turso SQLite: {raw_url}")
         else:
-            # Удерживаем корневое соединение в ОЗУ
             self._mem_uri = f"file:vorona_ram_{id(self)}?mode=memory&cache=shared"
             self._keepalive_mem_conn = sqlite3.connect(
                 self._mem_uri, uri=True, check_same_thread=False
@@ -814,6 +808,88 @@ class DatabaseManager:
 
         results.sort(key=lambda x: x["similarity"], reverse=True)
         return results[:top_k]
+
+    @staticmethod
+    def _search_token_matches(token: str, row: Dict[str, Any], haystack: str, row_lemmas: set) -> bool:
+        """Совпадает ли одно слово запроса с записью: дата, время или текст."""
+        parsed_date = row.get("parsed_date") or ""
+        parsed_time = row.get("parsed_time") or ""
+
+        m = re.fullmatch(r"(\d{1,2}):(\d{2})", token)
+        if m:
+            return bool(parsed_time) and parsed_time == f"{int(m.group(1)):02d}:{m.group(2)}"
+
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", token):
+            return parsed_date == token
+
+        m = re.fullmatch(r"(\d{1,2})\.(\d{1,2})(?:\.(\d{2}|\d{4}))?", token)
+        if m and len(parsed_date) == 10:
+            day, month, year = int(m.group(1)), int(m.group(2)), m.group(3)
+            if year and len(year) == 2:
+                year = "20" + year
+            if parsed_date[8:10] != f"{day:02d}" or parsed_date[5:7] != f"{month:02d}":
+                return False
+            return year is None or parsed_date[0:4] == year
+        if m:
+            return False
+
+        if len(token) <= 2:
+            return re.search(rf"(?<![а-яёa-z0-9]){re.escape(token)}(?![а-яёa-z0-9])", haystack) is not None
+        if token in haystack:
+            return True
+        stem = token[:4] if len(token) >= 5 else token
+        if len(stem) >= 3 and stem in haystack:
+            return True
+        try:
+            return morph.parse(token)[0].normal_form in row_lemmas
+        except Exception:
+            return False
+
+    def search_for_ui(self, query_text: str, limit: int = 50, user_id: int = 1) -> List[Dict[str, Any]]:
+        """Поиск для строки поиска в интерфейсе: по тексту, дате и времени (все слова запроса должны совпасть)."""
+        q = (query_text or "").strip().lower()
+        if not q:
+            return []
+        limit = max(1, min(int(limit), 500))
+        tokens = re.findall(r"[0-9a-zа-яё]+(?:[.:\-][0-9]+)*", q)
+        if not tokens:
+            return []
+
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, user_id, intent, raw_text, action, parsed_date, parsed_time,
+                       date_in_past, status, parse_method, created_at, lemmas
+                FROM tasks
+                WHERE user_id = ?
+                ORDER BY COALESCE(parsed_date, '9999-12-31') ASC,
+                         COALESCE(parsed_time, '23:59') ASC, id DESC
+                """,
+                (user_id,)
+            ).fetchall()
+
+        found: List[Dict[str, Any]] = []
+        for r in rows:
+            row = dict(r)
+            haystack = f"{row.get('action') or ''} {row.get('raw_text') or ''}".lower()
+            row_lemmas = set((row.get("lemmas") or "").split())
+            if all(self._search_token_matches(t, row, haystack, row_lemmas) for t in tokens):
+                row.pop("lemmas", None)
+                found.append(row)
+                if len(found) >= limit:
+                    break
+
+        if found:
+            return found
+
+        if any(re.fullmatch(r"\d{1,2}:\d{2}|\d{4}-\d{2}-\d{2}|\d{1,2}\.\d{1,2}(?:\.\d{2,4})?", t) for t in tokens):
+            return []
+
+        semantic = self.search_past_items(q, top_k=min(limit, 20), user_id=user_id)
+        for item in semantic:
+            item.pop("lemmas", None)
+            item.pop("similarity", None)
+        return semantic
 
     def get_history(
         self,
