@@ -130,15 +130,9 @@ GIGACHAT_CREDENTIALS=ваш_ключ_авторизации_GigaChat_в_Base64
 GIGACHAT_SCOPE=GIGACHAT_API_PERS
 GIGACHAT_MODEL=GigaChat-3-Ultra
 
-# Секретный ключ для подписи JWT/HMAC токенов авторизации
-VORONA_SECRET_KEY=ваш_секретный_ключ_сессий
-
 # Облачная база данных Turso (опционально; без этих переменных используется БД в ОЗУ)
 TURSO_DATABASE_URL=libsql://ваша-база.turso.io
 TURSO_AUTH_TOKEN=ваш_токен_turso
-
-# Подключение к удалённому серверу (опционально; по умолчанию поднимается локальный сервер)
-# VORONA_SERVER_URL=[https://ваш-сервер.example.com](https://ваш-сервер.example.com)
 ```
 
 #### 4. Старт приложения
