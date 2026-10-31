@@ -27,9 +27,8 @@
   color: var(--ink);
 }
 
-.history-row button:disabled {
-  opacity: 0.4;
-  cursor: default;
+.history-tools button {
+  white-space: nowrap;
 }
 
 .history-scroll {
@@ -79,8 +78,20 @@
   flex: 1;
 }
 
-.history-row button[title] {
-  padding: calc(var(--u) * 2) calc(var(--u) * 5);
+.history-row .history-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: calc(var(--u) * 38);
+  height: calc(var(--u) * 34);
+  padding: 0;
+  font-size: calc(var(--u) * 22);
+  line-height: 1;
+}
+
+.history-row .history-icon--done {
+  background: #e6f4ea;
 }
 
 .history-error {

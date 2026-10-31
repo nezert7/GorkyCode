@@ -22,12 +22,46 @@ function checkPassword(password: string, login: string): string | null {
   return issues.length ? `Исправьте пароль: ${issues.join(', ')}` : null
 }
 
+// Пиксельный глазик для кнопки показа пароля ("X" - закрашенный пиксель)
+const EYE_OPEN = [
+  '...XXXXXX...',
+  '..X......X..',
+  '.X..XXXX..X.',
+  'X..XX..XX..X',
+  'X..XX..XX..X',
+  '.X..XXXX..X.',
+  '..X......X..',
+  '...XXXXXX...',
+]
+const EYE_CLOSED = [
+  '............',
+  'X..........X',
+  '.XX......XX.',
+  '...XXXXXX...',
+  '..X..XX..X..',
+  '.X...XX...X.',
+  '............',
+  '............',
+]
+
+function EyeIcon({ open }: { open: boolean }) {
+  const rows = open ? EYE_OPEN : EYE_CLOSED
+  return (
+    <svg viewBox="0 0 12 8" shapeRendering="crispEdges" fill="currentColor" aria-hidden="true">
+      {rows.flatMap((row, y) =>
+        [...row].map((cell, x) => (cell === 'X' ? <rect key={`${x}-${y}`} x={x} y={y} width={1} height={1} /> : null)),
+      )}
+    </svg>
+  )
+}
+
 export default function AuthPage() {
   const [isLogin, setIsLogin] = useState(true)
   const [login, setLogin] = useState('')
   const [password, setPassword] = useState('')
   const [errors, setErrors] = useState<{ login?: string; password?: string; form?: string }>({})
   const [busy, setBusy] = useState(false)
+  const [showPassword, setShowPassword] = useState(false)
 
   const loginRef = useRef<HTMLInputElement>(null)
   const passRef = useRef<HTMLInputElement>(null)
@@ -145,6 +179,7 @@ export default function AuthPage() {
 
   function toggleMode() {
     setIsLogin(!isLogin)
+    setShowPassword(false)
     setErrors({})
     setLogin('')
     setPassword('')
@@ -177,18 +212,35 @@ export default function AuthPage() {
 
             <div className="auth-row" onMouseDown={() => clearFieldError('password')}>
               <label>Пароль:</label>
-              <input
-                ref={passRef}
-                type="password"
-                value={password}
-                onFocus={() => errors.password && setErrors({ ...errors, password: undefined })}
-                onChange={(e) => {
-                  if (errors.password) setErrors({ ...errors, password: undefined })
-                  setPassword(e.target.value)
-                }}
-                placeholder={errors.password || ''}
-                className={errors.password ? 'input-error' : ''}
-              />
+              <div className="auth-password">
+                <input
+                  ref={passRef}
+                  type={showPassword ? 'text' : 'password'}
+                  value={password}
+                  onFocus={() => errors.password && setErrors({ ...errors, password: undefined })}
+                  onChange={(e) => {
+                    if (errors.password) setErrors({ ...errors, password: undefined })
+                    setPassword(e.target.value)
+                  }}
+                  placeholder={errors.password || ''}
+                  className={errors.password ? 'input-error' : ''}
+                />
+                <button
+                  type="button"
+                  className="auth-eye"
+                  aria-label={showPassword ? 'Скрыть пароль' : 'Показать пароль'}
+                  aria-pressed={showPassword}
+                  title={showPassword ? 'Скрыть пароль' : 'Показать пароль'}
+                  onMouseDown={(e) => {
+                    // не сбрасываем ошибку и не уводим фокус из поля
+                    e.preventDefault()
+                    e.stopPropagation()
+                  }}
+                  onClick={() => setShowPassword(!showPassword)}
+                >
+                  <EyeIcon open={!showPassword} />
+                </button>
+              </div>
             </div>
 
             {errors.form && <p className="auth-error">{errors.form}</p>}
