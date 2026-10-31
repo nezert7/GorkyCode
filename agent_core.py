@@ -673,18 +673,30 @@ class RegexFallbackParser:
         }
 
 
+DEFAULT_GIGACHAT_MODEL = "GigaChat-3-Ultra"
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name) or default)
+    except ValueError:
+        return default
+
+
 class GigaChatClient:
-    """Прямой легковесный клиент GigaChat API поверх httpx."""
 
     OAUTH_URL = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
-    CHAT_URL = "https://gigachat.devices.sberbank.ru/api/v1/chat/completions"
+    CHAT_URL = "https://api.giga.chat/v1/chat/completions"
 
     def __init__(self, credentials: str, scope: str = "GIGACHAT_API_PERS"):
         self.credentials = re.sub(r"^(Basic|Bearer)\s+", "", credentials.strip(), flags=re.IGNORECASE)
         self.scope = scope
-        self.http = httpx.Client(verify=False, timeout=12.0)
+        self.model = (os.getenv("GIGACHAT_MODEL") or DEFAULT_GIGACHAT_MODEL).strip()
+        self.chat_url = (os.getenv("GIGACHAT_CHAT_URL") or self.CHAT_URL).strip()
+        self.http = httpx.Client(verify=False, timeout=_env_float("GIGACHAT_TIMEOUT", 25.0))
         self._access_token: Optional[str] = None
         self._expires_at: float = 0.0
+        print(f"[GigaChat] модель: {self.model} | {self.chat_url}")
 
     def _ensure_token(self) -> str:
         now_ts = time.time()
@@ -710,10 +722,17 @@ class GigaChatClient:
         self._expires_at = float(exp_ms) / 1000.0
         return self._access_token
 
+    def _post_chat(self, token: str, payload: Dict[str, Any]):
+        return self.http.post(
+            self.chat_url,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json=payload
+        )
+
     def complete_json(self, system_prompt: str, user_text: str) -> Optional[Dict[str, Any]]:
         token = self._ensure_token()
         payload = {
-            "model": "GigaChat",
+            "model": self.model,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"Текст: {user_text}"}
@@ -722,29 +741,23 @@ class GigaChatClient:
             "max_tokens": 250
         }
 
-        resp = self.http.post(
-            self.CHAT_URL,
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            json=payload
-        )
+        resp = self._post_chat(token, payload)
         if resp.status_code == 401:
             self._access_token = None
-            token = self._ensure_token()
-            resp = self.http.post(
-                self.CHAT_URL,
-                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                json=payload
-            )
+            resp = self._post_chat(self._ensure_token(), payload)
 
         if resp.status_code != 200:
+            # без этого лога ошибка модели или тарифа выглядит как «тихий» переход на RegEx
+            print(f"[GigaChat] HTTP {resp.status_code} для модели {self.model}: {resp.text[:200]}")
             return None
 
-        content = (
-            resp.json()
-            .get("choices", [{}])[0]
-            .get("message", {})
-            .get("content") or ""
-        )
+        data = resp.json()
+        answered_by = str(data.get("model") or "")
+        print(f"[GigaChat] ответила модель: {answered_by or 'не указана'}")
+        if answered_by and self.model.lower().split("-")[-1] not in answered_by.lower():
+            print(f"[GigaChat] запрошена {self.model}, а ответила {answered_by}")
+
+        content = (data.get("choices", [{}])[0].get("message", {}).get("content") or "")
         start_idx = content.find("{")
         end_idx = content.rfind("}")
         if start_idx == -1 or end_idx <= start_idx:
