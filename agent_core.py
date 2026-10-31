@@ -29,9 +29,9 @@ def format_date_ru(date_str: Optional[str]) -> str:
 class RussianDateTimeExtractor:
     """
     Точное извлечение дат и времени из русской речи:
-    - Корректная обработка «12 часов ночи» -> 00:00 и «12 часов дня» -> 12:00.
-    - Автоматический перенос дат прошедших месяцев (январь, февраль и т.д.) на следующий год (2027).
-    - Детектирование несуществующих календарных дат («31 февраля», «30 февраля», «31 апреля» и т.д.).
+    - «12 часов ночи» -> 00:00, «12 часов дня» -> 12:00.
+    - Реальные прошедшие даты текущего года (например, 15 февраля) переносятся на 2027 год.
+    - Любые несуществующие даты (31 февраля, 31 ноября, 31 апреля, 29 февраля) строго блокируются и требуют уточнения.
     """
 
     WORD_HOURS = {
@@ -53,11 +53,10 @@ class RussianDateTimeExtractor:
         "ноль": 0
     }
 
-    # Числительные дней месяца словами (от 31 до 1 для замены перед парсингом дат)
     WORD_DAYS = [
-        (r"тридцать\s+вторых|тридцать\s+второго|тридцать\s+второе", 32),
-        (r"тридцать\s+первого|тридцать\s+первое|тридцать\s+один", 31),
-        (r"тридцатого|тридцатое|тридцать", 30),
+        (r"тридцать\s+вторых|тридцать\s+второго|тридцать\s+второе|тридцать\s+два", 32),
+        (r"тридцать\s+первого|тридцать\s+первое|тридцать\s+первым|тридцать\s+один", 31),
+        (r"тридцатого|тридцатое|тридцатым|тридцать", 30),
         (r"двадцать\s+девятого|двадцать\s+девятое|двадцать\s+девять", 29),
         (r"двадцать\s+восьмого|двадцать\s+восьмое|двадцать\s+восемь", 28),
         (r"двадцать\s+седьмого|двадцать\s+седьмое|двадцать\s+семь", 27),
@@ -95,32 +94,43 @@ class RussianDateTimeExtractor:
         "субботу": 5, "суббота": 5, "воскресенье": 6
     }
 
-    MONTHS_MAP = {
-        "январ": 1, "феврал": 2, "март": 3, "апрел": 4, "ма": 5, "июн": 6,
-        "июл": 7, "август": 8, "сентябр": 9, "октябр": 10, "ноябр": 11, "декабр": 12
-    }
+    # Порядок ключей важен: "март" проверяется раньше "ма" (май)
+    MONTHS_LIST = [
+        ("январ", 1), ("феврал", 2), ("март", 3), ("апрел", 4), ("ма", 5), ("июн", 6),
+        ("июл", 7), ("август", 8), ("сентябр", 9), ("октябр", 10), ("ноябр", 11), ("декабр", 12)
+    ]
 
     MONTH_REGEX_PART = (
-        r"(январ[яеюь]?|феврал[яеюь]?|март[аеу]?|апрел[яеюь]?|ма[яеюй]|июн[яеюь]?|"
-        r"июл[яеюь]?|август[аеу]?|сентябр[яеюь]?|октябр[яеюь]?|ноябр[яеюь]?|декабр[яеюь]?)"
+        r"(январ[яеюьм]?|феврал[яеюьм]?|март[аеуом]?|апрел[яеюьм]?|ма[яеюйм]|июн[яеюьм]?|"
+        r"июл[яеюьм]?|август[аеуом]?|сентябр[яеюьм]?|октябр[яеюьм]?|ноябр[яеюьм]?|декабр[яеюьм]?)"
     )
 
     @classmethod
+    def _match_month_number(cls, month_word: str) -> Optional[int]:
+        w = month_word.strip().lower()
+        for prefix, num in cls.MONTHS_LIST:
+            if w.startswith(prefix):
+                return num
+        return None
+
+    @classmethod
     def _normalize_word_days_before_months(cls, text: str) -> str:
-        """Превращает «тридцать первого февраля» -> «31 февраля», «пятнадцатого марта» -> «15 марта»."""
+        """Превращает числительные словами рядом с месяцами в цифры («тридцать первого февраля» -> «31 февраля»)."""
         res = text
         for word_pat, day_num in cls.WORD_DAYS:
-            pattern = rf"\b(?:{word_pat})\s+{cls.MONTH_REGEX_PART}\b"
-            res = re.sub(pattern, rf"{day_num} \1", res, flags=re.IGNORECASE)
+            # «тридцать первого [числа] февраля» -> «31 февраля»
+            pat_before = rf"\b(?:{word_pat})\s+(?:числ[аоуе]?\s+)?{cls.MONTH_REGEX_PART}\b"
+            res = re.sub(pat_before, rf"{day_num} \1", res, flags=re.IGNORECASE)
+            # «в феврале тридцать первого [числа]» -> «31 февраля»
+            pat_after = rf"\b(?:в|на)\s+{cls.MONTH_REGEX_PART}\s+(?:{word_pat})(?:\s+числ[аоуе]?)?\b"
+            res = re.sub(pat_after, rf"{day_num} \1", res, flags=re.IGNORECASE)
         return res
 
     @staticmethod
     def _adjust_hour_by_period(h: int, period_context: str) -> int:
         p = period_context.lower()
         if "ноч" in p:
-            if h == 12:
-                return 0
-            return h
+            return 0 if h == 12 else h
         if "вечер" in p or "дня" in p or "день" in p:
             if 1 <= h <= 11:
                 return h + 12
@@ -133,32 +143,26 @@ class RussianDateTimeExtractor:
     @staticmethod
     def _resolve_year_for_month_day(month: int, day: int, explicit_year: Optional[int], now: datetime) -> datetime:
         """
-        Вычисляет дату. Если год не указан явно, а дата в текущем году уже прошла (например, февраль при текущем октябре),
-        автоматически ставит следующий год (now.year + 1).
-        Выбрасывает ValueError, если дата не существует в календаре (например, 31 февраля).
+        Проверяет существование даты и вычисляет год.
+        Если такой даты (например, 31 февраля, 31 ноября, 29 февраля) нет в календаре —
+        НЕ переносит на другой год, а сразу выбрасывает ValueError для запроса уточнения у пользователя.
         """
         if explicit_year is not None:
             return datetime(explicit_year, month, day)
 
-        # Проверяем в текущем году; если дата уже прошла — переносим на следующий год
-        try:
-            candidate = datetime(now.year, month, day)
-            if candidate.date() < now.date():
-                return datetime(now.year + 1, month, day)
-            return candidate
-        except ValueError:
-            # Например, 29 февраля: проверим, не является ли следующий год високосным, если этот месяц уже прошёл
-            if (month, day) < (now.month, now.day):
-                return datetime(now.year + 1, month, day)
-            raise
+        # Сначала строго проверяем, существует ли эта дата в текущем году
+        candidate = datetime(now.year, month, day)
+        # Если дата реально существует, но в этом году уже прошла (например, 15 февраля) — ставим следующий год
+        if candidate.date() < now.date():
+            return datetime(now.year + 1, month, day)
+        return candidate
 
     @classmethod
     def extract_date_and_time_full(
         cls, text: str, now: datetime
     ) -> Tuple[Optional[str], Optional[str], str, Optional[str]]:
         """
-        Возвращает кортеж: (parsed_date, parsed_time, clean_text_without_datetime, invalid_date_error).
-        Если пользователь назвал несуществующую дату («31 февраля»), invalid_date_error содержит эту фразу.
+        Возвращает: (parsed_date, parsed_time, clean_text_without_datetime, invalid_date_error).
         """
         clean = cls._normalize_word_days_before_months(text)
         lower = clean.lower()
@@ -166,7 +170,7 @@ class RussianDateTimeExtractor:
         parsed_date: Optional[str] = None
         invalid_date_str: Optional[str] = None
 
-        # 0. Явный перехват «12 часов ночи» / «двенадцать ночи» / «полночь» и «12 часов дня» / «полдень»
+        # 0. Явный перехват «12 часов ночи» / «полночь» -> 00:00 и «12 часов дня» / «полдень» -> 12:00
         midnight_m = re.search(
             r"\b(?:в|на|к)?\s*(?:12|двенадцат[ьи])\s*(?:час(?:а|ов|у)?\s*)?ночи\b|\b(?:в|на)?\s*полночь\b",
             lower
@@ -184,14 +188,13 @@ class RussianDateTimeExtractor:
             clean = clean[:noon_m.start()] + " " + clean[noon_m.end():]
             lower = clean.lower()
 
-        # 1. Время в формате HH:MM или HH.MM (но не дата вида 15.02.2027)
+        # 1. Время в формате HH:MM или HH.MM
         if not parsed_time:
             tm = re.search(
                 r"(?:(?:\bв|\bна|\bк)\s+)?\b([0-2]?\d)[:.]([0-5]\d)(?!\.\d{2,4})\b(?:\s*(утра|вечера|дня|ночи))?",
                 lower
             )
             if tm:
-                # Убеждаемся, что точка не является датой DD.MM без предлога времени
                 is_date_dot = "." in tm.group(0) and not re.search(r"\b(?:в|к)\s+\d", tm.group(0))
                 if not is_date_dot:
                     h, m = int(tm.group(1)), int(tm.group(2))
@@ -209,75 +212,60 @@ class RussianDateTimeExtractor:
                 period_ctx = half_m.group(2) or lower
                 if target_h == 11 and "ноч" in period_ctx:
                     target_h = 23
-                elif ("вечер" in period_ctx or "дня" in period_ctx or 1 <= target_h <= 6) and target_h < 12 and "утр" not in period_ctx and "ноч" not in period_ctx:
+                elif (
+                    ("вечер" in period_ctx or "дня" in period_ctx or 1 <= target_h <= 6)
+                    and target_h < 12
+                    and "утр" not in period_ctx
+                    and "ноч" not in period_ctx
+                ):
                     target_h += 12
                 parsed_time = f"{target_h % 24:02d}:30"
                 clean = clean[:half_m.start()] + " " + clean[half_m.end():]
                 lower = clean.lower()
 
-        # 3. Время цифрами: «в 15 часов», «в 3 часа дня», «в 12 ночи», «в 7 вечера»
-        if not parsed_time:
-            hm = re.search(
-                r"\b(?:(?:в|на|к)\s+([0-2]?\d)\s*(?:час(?:а|ов|у)?)?(?:\s*(утра|вечера|дня|ночи))?|"
-                r"([0-2]?\d)\s*(?:час(?:а|ов|у)?\s+)?(утра|вечера|дня|ночи))\b",
+        # 3. Даты с названием месяца («31 февраля», «31 ноября», «15 февраля», «в феврале 31 числа»)
+        # Важно: проверяем даты с месяцем ДО одиночных часовых чисел, чтобы «на 31 февраля» не приняло 31 за часы
+        month_m = re.search(
+            rf"(?:\b(?:на|в)\s+)?\b(\d{{1,2}})\s+(?:числ[аоуе]?\s+)?{cls.MONTH_REGEX_PART}(?:\s+(\d{{4}})\s*(?:год[ау]?|г\.?)?)?\b",
+            lower
+        )
+        if not month_m:
+            month_m_rev = re.search(
+                rf"\b(?:в|на)\s+{cls.MONTH_REGEX_PART}\s+(\d{{1,2}})(?:\s*числ[аоуе]?)?(?:\s+(\d{{4}})\s*(?:год[ау]?|г\.?)?)?\b",
                 lower
             )
-            if hm:
-                # Проверяем, что после числа не идёт название месяца (например «на 15 февраля»)
-                after_slice = lower[hm.end():].lstrip()
-                if not re.match(cls.MONTH_REGEX_PART, after_slice):
-                    h_str = hm.group(1) if hm.group(1) is not None else hm.group(3)
-                    period_word = hm.group(2) or hm.group(4) or ""
-                    h = int(h_str)
-                    if 0 <= h <= 24:
-                        if h == 24:
-                            h = 0
-                        else:
-                            h = cls._adjust_hour_by_period(h, period_word or lower)
-                        parsed_time = f"{h:02d}:00"
-                        clean = clean[:hm.start()] + " " + clean[hm.end():]
-                        lower = clean.lower()
+        else:
+            month_m_rev = None
 
-        # 4. Время словами: «в три часа дня», «в час ночи», «в двенадцать ночи»
-        if not parsed_time:
-            for word, h_val in sorted(cls.WORD_HOURS.items(), key=lambda x: -len(x[0])):
-                pat = rf"\b(?:(?:в|на|к)\s+{word}(?:\s+час(?:а|ов|у)?)?(?:\s+(утра|дня|вечера|ночи))?|{word}\s+(?:час(?:а|ов|у)?\s+)?(утра|дня|вечера|ночи))\b"
-                wm = re.search(pat, lower)
-                if wm:
-                    after_slice = lower[wm.end():].lstrip()
-                    if re.match(cls.MONTH_REGEX_PART, after_slice):
-                        continue
-                    period = wm.group(1) or wm.group(2) or ""
-                    h = cls._adjust_hour_by_period(h_val, period or lower)
-                    if 0 <= h <= 23:
-                        parsed_time = f"{h:02d}:00"
-                        clean = clean[:wm.start()] + " " + clean[wm.end():]
-                        lower = clean.lower()
-                        break
+        if month_m or month_m_rev:
+            if month_m:
+                d = int(month_m.group(1))
+                m_word = month_m.group(2)
+                explicit_y = int(month_m.group(3)) if month_m.group(3) else None
+                span_start, span_end = month_m.start(), month_m.end()
+            else:
+                m_word = month_m_rev.group(1)
+                d = int(month_m_rev.group(2))
+                explicit_y = int(month_m_rev.group(3)) if month_m_rev.group(3) else None
+                span_start, span_end = month_m_rev.start(), month_m_rev.end()
 
-        # 5. Даты с названием месяца («15 февраля», «31 февраля», «10 марта 2027 года»)
-        month_m = re.search(
-            rf"(?:\b(?:на|в)\s+)?\b(\d{{1,2}})\s+{cls.MONTH_REGEX_PART}(?:\s+(\d{{4}})\s*(?:год[ау]?|г\.?)?)?\b",
-            clean.lower()
-        )
-        if month_m:
-            d = int(month_m.group(1))
-            m_word = month_m.group(2)
-            explicit_y = int(month_m.group(3)) if month_m.group(3) else None
-            m_prefix = m_word[:5]
-            m_num = next((v for k, v in cls.MONTHS_MAP.items() if m_prefix.startswith(k)), now.month)
+            m_num = cls._match_month_number(m_word)
             raw_matched_date = f"{d} {m_word}"
-            clean = clean[:month_m.start()] + " " + clean[month_m.end():]
+            clean = clean[:span_start] + " " + clean[span_end:]
             lower = clean.lower()
-            try:
-                dt = cls._resolve_year_for_month_day(m_num, d, explicit_y, now)
-                parsed_date = dt.strftime("%Y-%m-%d")
-            except ValueError:
-                invalid_date_str = raw_matched_date
 
-        # 6. Даты формата DD.MM(.YYYY)
+            if m_num is None:
+                invalid_date_str = raw_matched_date
+            else:
+                try:
+                    dt = cls._resolve_year_for_month_day(m_num, d, explicit_y, now)
+                    parsed_date = dt.strftime("%Y-%m-%d")
+                except ValueError:
+                    invalid_date_str = raw_matched_date
+
+        # 4. Даты формата DD.MM(.YYYY)
         if not parsed_date and not invalid_date_str:
-            dm_match = re.search(r"(?:\bна\s+)?\b(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?\b", clean.lower())
+            dm_match = re.search(r"(?:\bна\s+)?\b(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?\b", lower)
             if dm_match:
                 d, m = int(dm_match.group(1)), int(dm_match.group(2))
                 explicit_y = int(dm_match.group(3)) if dm_match.group(3) else None
@@ -289,6 +277,40 @@ class RussianDateTimeExtractor:
                     parsed_date = dt.strftime("%Y-%m-%d")
                 except ValueError:
                     invalid_date_str = raw_matched_date
+
+        # 5. Время цифрами: «в 15 часов», «в 3 часа дня», «в 12 ночи», «в 7 вечера»
+        if not parsed_time:
+            hm = re.search(
+                r"\b(?:(?:в|на|к)\s+([0-2]?\d)\s*(?:час(?:а|ов|у)?)?(?:\s*(утра|вечера|дня|ночи))?|"
+                r"([0-2]?\d)\s*(?:час(?:а|ов|у)?\s+)?(утра|вечера|дня|ночи))\b",
+                lower
+            )
+            if hm:
+                h_str = hm.group(1) if hm.group(1) is not None else hm.group(3)
+                period_word = hm.group(2) or hm.group(4) or ""
+                h = int(h_str)
+                if 0 <= h <= 24:
+                    h = 0 if h == 24 else cls._adjust_hour_by_period(h, period_word or lower)
+                    parsed_time = f"{h:02d}:00"
+                    clean = clean[:hm.start()] + " " + clean[hm.end():]
+                    lower = clean.lower()
+
+        # 6. Время словами: «в три часа дня», «в час ночи», «в двенадцать ночи»
+        if not parsed_time:
+            for word, h_val in sorted(cls.WORD_HOURS.items(), key=lambda x: -len(x[0])):
+                pat = (
+                    rf"\b(?:(?:в|на|к)\s+{word}(?:\s+час(?:а|ов|у)?)?(?:\s+(утра|дня|вечера|ночи))?|"
+                    rf"{word}\s+(?:час(?:а|ов|у)?\s+)?(утра|дня|вечера|ночи))\b"
+                )
+                wm = re.search(pat, lower)
+                if wm:
+                    period = wm.group(1) or wm.group(2) or ""
+                    h = cls._adjust_hour_by_period(h_val, period or lower)
+                    if 0 <= h <= 23:
+                        parsed_time = f"{h:02d}:00"
+                        clean = clean[:wm.start()] + " " + clean[wm.end():]
+                        lower = clean.lower()
+                        break
 
         # 7. Относительные даты: послезавтра, завтра, сегодня, вчера, через неделю
         if not parsed_date and not invalid_date_str:
@@ -487,28 +509,26 @@ class RegexFallbackParser:
     def detect_intent(cls, text: str, llm_intent: Optional[str] = None) -> str:
         lower = text.lower()
 
-        # 1. Явные голосовые команды выбора типа («поставь задачу», «поставь напоминание», «назначь встречу»)
         if re.search(r"\b(?:поставь|создай|добавь|запиши|новая)\s+задач[уаи]\b", lower):
             return "Task"
         if re.search(r"\b(?:назначь|создай|добавь|запиши|поставь)\s+встреч[уаи]\b", lower):
             return "Meeting"
-        if re.search(r"\b(?:поставь|создай|добавь|сделай|запиши)\s+напоминан[иея]\b|\b(?:напомни|не\s+забыть|не\s+забудь)\b", lower):
-            # Если внутри фразы «напомни о встрече с...» явно идёт встреча, проверим контекст
+        if re.search(
+            r"\b(?:поставь|создай|добавь|сделай|запиши)\s+напоминан[иея]\b|\b(?:напомни|не\s+забыть|не\s+забудь)\b",
+            lower
+        ):
             if any(k in lower for k in ("встреч", "созвон", "обед с", "собеседован")):
                 return "Meeting"
             return "Reminder"
 
-        # 2. Проверка на Встречу (Meeting)
         if "совещан" in lower and not any(p in lower for p in cls.TASK_PREP_BEFORE_MEETING):
             return "Meeting"
         if any(k in lower for k in cls.MEETING_KEYWORDS) and "повестк" not in lower:
             return "Meeting"
 
-        # 3. Проверка на Напоминание (Reminder)
         if any(k in lower for k in cls.REMINDER_KEYWORDS):
             return "Reminder"
 
-        # 4. Если LLM вернула валидный тип — используем его, иначе Task
         if llm_intent in VALID_INTENTS:
             return llm_intent
         return "Task"
@@ -516,7 +536,6 @@ class RegexFallbackParser:
     @classmethod
     def clean_action_text(cls, text: str, now: datetime) -> Optional[str]:
         _, _, clean, _ = RussianDateTimeExtractor.extract_date_and_time_full(text, now)
-        # Если сказали «назначь встречу с Иваном», превращаем «встречу с» -> «Встреча с»
         clean = re.sub(
             r"\b(?:назначь|запиши|поставь|создай|добавь)\s+встречу\s+(с|со|у|в|на)\b",
             r"Встреча \1",
@@ -769,10 +788,6 @@ class VoronaAgentCore:
 
     @classmethod
     def _ensure_future_year(cls, date_str: Optional[str], raw_text: str, now: datetime) -> Optional[str]:
-        """
-        Если LLM вернула дату в текущем году (например, 2026-02-15), которая уже в прошлом,
-        а пользователь НЕ называл явно 2026 год или слово «вчера», автоматически переносит год на 2027.
-        """
         valid = cls._validate_calendar_date(date_str)
         if not valid:
             return None
@@ -805,7 +820,7 @@ class VoronaAgentCore:
         lower = clean.lower()
         if "?" in clean or any(
             lower.startswith(q) for q in (
-                "уточните", "на какое", "на какую", "какое событие", "когда", "во сколько", "такой даты"
+                "уточните", "на какое", "на какую", "какое событие", "когда", "во сколько", "такой даты", "даты "
             )
         ):
             return None
@@ -898,7 +913,6 @@ class VoronaAgentCore:
 
         clean_input = raw_text.strip()
 
-        # Если фронтенд прислал техническую фразу для сохранения с дефолтами:
         if "по умолчанию" in clean_input.lower() or "оставь как есть" in clean_input.lower():
             staged = self.pending_buffer.get(session_key) or {}
             final_action = (staged.get("action") or "").strip() or "Событие"
@@ -929,11 +943,9 @@ class VoronaAgentCore:
                 }
             }
 
-        # Если новая реплика — самостоятельная команда (удали, перенеси, найди, что у меня), сбрасываем черновик
         if RegexFallbackParser.parse_standalone_command(clean_input, now) is not None:
             self.pending_buffer.pop(session_key, None)
 
-        # Извлекаем дату, время и проверяем на несуществующую дату («31 февраля») в текущей реплике
         dt_date_new, dt_time_new, clean_input_no_dt, invalid_date_new = (
             RussianDateTimeExtractor.extract_date_and_time_full(clean_input, now)
         )
@@ -945,8 +957,12 @@ class VoronaAgentCore:
         else:
             combined_input = clean_input
 
+        # Если обнаружена несуществующая дата («31 февраля», «31 ноября»), передаём в LLM текст БЕЗ неё,
+        # чтобы LLM не подменила «31 февраля» на «31 октября» или «28 февраля»!
+        llm_query_text = clean_input_no_dt if invalid_date_new else combined_input
+
         parse_method = "llm"
-        parsed_data = self._call_llm_json(combined_input, now, user_id=user_id)
+        parsed_data = self._call_llm_json(llm_query_text, now, user_id=user_id) if llm_query_text else None
 
         if not isinstance(parsed_data, dict) or "operation" not in parsed_data:
             parse_method = "regex"
@@ -1069,7 +1085,6 @@ class VoronaAgentCore:
         llm_time = self._validate_time(parsed_data.get("time"))
         llm_intent = parsed_data.get("intent") if parsed_data.get("intent") in VALID_INTENTS else None
 
-        # Если обнаружена несуществующая дата (например «31 февраля»), блокируем любую придуманную LLM дату!
         if invalid_date_new:
             llm_date = None
             dt_date_new = None
@@ -1084,7 +1099,6 @@ class VoronaAgentCore:
         if not has_any_date_word and not (prev_staged and prev_staged.get("parsed_date")):
             llm_date = None
 
-        # Приоритет локального парсера дат и времени (особенно для «12 часов ночи» -> 00:00 и переноса на 2027 год)
         if prev_staged:
             validated_date = None if invalid_date_new else (dt_date_new or llm_date or prev_staged.get("parsed_date"))
             validated_time = dt_time_new or llm_time or prev_staged.get("parsed_time")
@@ -1094,7 +1108,6 @@ class VoronaAgentCore:
             validated_time = dt_time_new or llm_time
             action = action_from_new or llm_action
 
-        # Определяем тип (Task / Reminder / Meeting) по полному контексту реплик
         prev_intent = prev_staged.get("intent") if prev_staged else None
         intent = RegexFallbackParser.detect_intent(
             combined_input,
@@ -1107,11 +1120,14 @@ class VoronaAgentCore:
         self.fail_streak[session_key] = 0
         date_in_past = 1 if (validated_date and validated_date < today_str) else 0
 
-        # Если в реплике была некорректная дата («31 февраля»), не сохраняем её в черновик raw_text,
-        # чтобы на следующем шаге уточнения она не вызывала повторную ошибку
         safe_raw_for_stage = combined_input
         if invalid_date_new:
-            safe_raw_for_stage = action or clean_input_no_dt
+            parts_for_stage = []
+            if prev_staged and prev_staged.get("raw_text"):
+                parts_for_stage.append(prev_staged["raw_text"])
+            if clean_input_no_dt:
+                parts_for_stage.append(clean_input_no_dt)
+            safe_raw_for_stage = ". ".join(parts_for_stage).strip(" .") or (action or "")
 
         staged_record = {
             "user_id": user_id,
@@ -1383,4 +1399,3 @@ def run_agent_turn(
     )
     res["spoken_response"] = format_spoken_response(res)
     return res
-
